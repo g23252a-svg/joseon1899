@@ -1,0 +1,59 @@
+<title>조선 1899</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Song+Myung&family=Nanum+Brush+Script&display=swap" rel="stylesheet">
+<style>
+  /* 한 장의 한지 위에 그린 세계: 단일 테마(밤은 게임 안에서 색조로 표현) */
+  :root {
+    --paper: #efe6d2;
+    --paper-deep: #e2d5b8;
+    --ink: #1d1b18;
+    --ink-soft: #4a453d;
+    --seal: #a8322a;
+    --indigo: #2f4a5c;
+    --font-body: "Gowun Batang", "Batang", "AppleMyungjo", serif;
+    --font-display: "Song Myung", "Gowun Batang", "Batang", serif;
+    --font-brush: "Nanum Brush Script", "Song Myung", cursive;
+    color-scheme: light;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  #app { position: fixed; inset: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px) 0; overflow: hidden; }
+  #game { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: crosshair; }
+  #ui { position: absolute; inset: 0; pointer-events: none; }
+  #ui > * { pointer-events: auto; }
+  #loading {
+    position: absolute; inset: 0; display: grid; place-items: center; background: var(--paper);
+    z-index: 100;
+  }
+  #loading .box { display: grid; gap: 14px; justify-items: center; padding-inline: 16px; }
+  #loading h1 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: clamp(36px, 8vw, 64px); letter-spacing: 0.08em; }
+  #loading .seal { width: 44px; height: 44px; border: 2px solid var(--seal); color: var(--seal); display: grid; place-items: center; font-family: var(--font-display); font-size: 20px; border-radius: 3px; transform: rotate(-4deg); }
+  #loading .track { width: min(320px, 70vw); height: 3px; background: var(--paper-deep); }
+  #loading-bar { height: 100%; width: 0; background: var(--ink); transition: width 0.2s; }
+  #loading-text { font-size: 14px; color: var(--ink-soft); min-height: 1.4em; }
+  @media (prefers-reduced-motion: reduce) { #loading-bar { transition: none; } }
+</style>
+<div id="app">
+  <canvas id="game" tabindex="0" aria-label="게임 화면"></canvas>
+  <div id="ui"></div>
+  <div id="loading">
+    <div class="box">
+      <div class="seal">光武</div>
+      <h1>조선 1899</h1>
+      <div class="track"><div id="loading-bar"></div></div>
+      <div id="loading-text">붓을 적시는 중</div>
+    </div>
+  </div>
+</div>
+<script type="module" src="js/main.js"></script>

@@ -1,0 +1,8 @@
+{
+  "name": "joseon1899",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node tools/smoke.mjs"
+  }
+}
