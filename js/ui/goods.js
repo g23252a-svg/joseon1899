@@ -21,8 +21,14 @@ export function ensureItemDefs(onLoad) {
     .catch(() => {});
 }
 
+// 소지품 목록이 넘겨준 정의를 기억해 둔다 (items.js 를 못 불러와도 상점 등에서 이름을 쓰게)
+const seenDefs = new Map();
+
 export function defOf(id, entry) {
-  if (entry?.def) return entry.def;
+  if (entry?.def && typeof entry.def === 'object') {
+    seenDefs.set(id, entry.def);
+    return entry.def;
+  }
   const d = safe(() => itemsMod?.itemDef?.(id), null);
   if (d) return d;
   const I = itemsMod?.ITEMS;
@@ -30,7 +36,7 @@ export function defOf(id, entry) {
     const x = Array.isArray(I) ? I.find((i) => i?.id === id) : I[id];
     if (x) return x;
   }
-  return { id, name: String(id), cat: 'other' };
+  return seenDefs.get(id) || { id, name: String(id), cat: 'other' };
 }
 
 export const CATS = {
@@ -57,7 +63,9 @@ function isUsable(def) {
 
 function invList(game) {
   const l = safe(() => game.sys.inventory?.list?.(), []);
-  return Array.isArray(l) ? l.filter((e) => e && e.id != null && (e.n ?? 1) > 0) : [];
+  const out = Array.isArray(l) ? l.filter((e) => e && e.id != null && (e.n ?? 1) > 0) : [];
+  for (const e of out) if (e.def && typeof e.def === 'object') seenDefs.set(e.id, e.def);
+  return out;
 }
 
 // ==================================================================== 소지품
@@ -137,14 +145,13 @@ export function createInventoryView(c) {
     list.textContent = '';
     cells = new Map();
     const inv = game.sys.inventory;
-    setClass(el, 'jx-solo', !inv?.list || !invList(game).length);
+    items = inv?.list ? invList(game) : [];
+    setClass(el, 'jx-solo', !items.length);
     if (!inv?.list) {
-      items = [];
       list.append(emptyNote('囊', '보따리를 아직 풀 수 없습니다', '소지품 기능이 준비되면 여기에 물건이 나옵니다.'));
       renderDetail();
       return;
     }
-    items = invList(game);
     if (!items.length) {
       list.append(emptyNote('空', '보따리가 비어 있습니다', '사냥하고, 약초를 캐고, 길에서 물건을 주워 보십시오.'));
       sel = null;
@@ -237,6 +244,7 @@ export function createCraftView(c) {
       el.append(emptyNote('工', '아직 손재주를 부릴 수 없습니다', '제작 기능이 준비되면 만들 수 있는 것이 여기에 나옵니다.'));
       return;
     }
+    invList(game); // 소지품 정의를 먼저 기억해 둔다 (재료 이름 표시용)
     const recipes = (safe(() => cr.recipes(), []) || []).filter((r) => r && r.id != null);
     if (!recipes.length) {
       el.append(emptyNote('工', '만들 수 있는 것이 없습니다', '기술을 익히면 새 조리법이 생깁니다.'));
@@ -342,7 +350,10 @@ export function createShopView(c) {
     const def = defOf(sel.id);
     setText(tradeName, `${def.name || sel.id} · 한 개 ${c.money(sel.price)}`);
     setText(qtyOut, String(qty));
-    setText(total, `${sel.mode === 'buy' ? '값' : '받을 돈'} ${c.money(sel.price * qty)}`);
+    const short = sel.mode === 'buy' && sel.max < 1;
+    const soldOut = short && sel.left != null && sel.left < 1;
+    setText(total, soldOut ? '다 팔렸습니다' : short ? '돈이 모자랍니다' : `${sel.mode === 'buy' ? '값' : '받을 돈'} ${c.money(sel.price * qty)}`);
+    setClass(total, 'jx-lack', short);
     minus.disabled = qty <= 1;
     plus.disabled = qty >= sel.max;
     go.textContent = sel.mode === 'buy' ? '사기' : '팔기';
@@ -360,8 +371,8 @@ export function createShopView(c) {
     refresh();
   }
 
-  function row(mode, id, price, sub, max) {
-    const def = defOf(id);
+  function row(mode, id, price, sub, max, entry, left = null) {
+    const def = defOf(id, entry);
     const b = h(
       'button',
       {
@@ -369,7 +380,7 @@ export function createShopView(c) {
         type: 'button',
         'aria-pressed': sel && sel.mode === mode && sel.id === id ? 'true' : 'false',
         onclick: () => {
-          sel = { mode, id, price, max };
+          sel = { mode, id, price, max, left };
           qty = 1;
           for (const r of rowBtns) r.setAttribute('aria-pressed', r === b ? 'true' : 'false');
           renderTrade();
@@ -396,6 +407,7 @@ export function createShopView(c) {
       return;
     }
     const money = Number(game.sys.inventory?.money) || 0;
+    const mine = invList(game).filter((e) => catOf(defOf(e.id, e)) !== 'quest');
     const stock = (safe(() => sh.stock?.(shopId), []) || []).filter((s) => s && s.itemId != null);
     buyCol.append(h('h3', { class: 'jx-sec-h' }, h('span', { text: '사기' }), h('small', { text: '買' })));
     if (!stock.length) buyCol.append(h('p', { class: 'jx-muted', text: '팔 물건이 다 떨어졌습니다.' }));
@@ -405,13 +417,12 @@ export function createShopView(c) {
       const left = typeof s.n === 'number' && isFinite(s.n) ? s.n : 99;
       const max = Math.min(left, price > 0 ? Math.floor(money / price) : 99, 99);
       if (sel?.mode === 'buy' && sel.id === s.itemId) {
-        sel = { mode: 'buy', id: s.itemId, price, max };
+        sel = { mode: 'buy', id: s.itemId, price, max, left };
         stillSel = true;
       }
-      buyCol.append(row('buy', s.itemId, price, typeof s.n === 'number' && isFinite(s.n) ? `${s.n}개 남음` : '', max));
+      buyCol.append(row('buy', s.itemId, price, typeof s.n === 'number' && isFinite(s.n) ? `${s.n}개 남음` : '', max, null, left));
     }
     sellCol.append(h('h3', { class: 'jx-sec-h' }, h('span', { text: '팔기' }), h('small', { text: '賣' })));
-    const mine = invList(game).filter((e) => catOf(defOf(e.id, e)) !== 'quest');
     let nSell = 0;
     for (const e of mine) {
       const price = Number(safe(() => sh.sellPrice?.(shopId, e.id), 0)) || 0;
@@ -422,7 +433,7 @@ export function createShopView(c) {
         sel = { mode: 'sell', id: e.id, price, max };
         stillSel = true;
       }
-      sellCol.append(row('sell', e.id, price, `${e.n ?? 1}개 가짐`, max));
+      sellCol.append(row('sell', e.id, price, `${e.n ?? 1}개 가짐`, max, e));
     }
     if (!nSell) sellCol.append(h('p', { class: 'jx-muted', text: '이 가게가 사 줄 물건이 없습니다.' }));
     if (!stillSel) sel = null;

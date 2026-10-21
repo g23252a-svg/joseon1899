@@ -3,7 +3,9 @@
 //   showTitle() hideTitle() toast(text, kind) banner(title, subtitle, seconds) fade(toBlack, ms) → Promise
 //   dialogue(lines, opts) → Promise   choice(question, options) → Promise<number>
 //   openPanel(name, arg) closePanel() panelOpen(열린 패널 이름 | null)
-// 덧붙인 것: setWaypoint(x, y) clearWaypoint() setVolume(0~1) getVolume() isTouch played dialogueOpen
+// 덧붙인 것: setWaypoint(x, y) clearWaypoint() setVolume(0~1) getVolume() saveGame(slot) loadGame(slot) hasSave(slot)
+//            isTouch played dialogueOpen hud
+// 이벤트: 'ui:panel' {name, open}, 'waypoint' {x, y, set, reached}
 
 import { clamp01, coarsePointer, formatMoney, h, lsGet, lsSet, reducedMotion, safe, setClass, setText, ssGet, ssSet } from './dom.js';
 import { createDialogue } from './dialogue.js';
@@ -70,12 +72,19 @@ export function install(game) {
     clearWaypoint,
     setVolume,
     getVolume,
+    /** 저장/불러오기 + 알림 (save 시스템이 알림을 띄우면 겹쳐 띄우지 않는다) */
+    saveGame: (slot) => withNotice(() => game.sys.save?.save?.(slot ?? 'auto'), '기록을 남겼습니다', '기록을 남기지 못했습니다'),
+    loadGame: (slot) => withNotice(() => game.sys.save?.load?.(slot ?? 'auto'), '남긴 기록을 불러왔습니다', '기록을 불러오지 못했습니다'),
+    hasSave(slot) {
+      const s = game.sys.save;
+      if (typeof s?.load !== 'function') return false;
+      return !!safe(() => (typeof s.hasSave === 'function' ? s.hasSave(slot ?? 'auto') : true), false);
+    },
 
     init() {},
     onStart() {
       played = true;
       if (title.visible) title.hide();
-      if (volume != null) safe(() => game.sys.audio?.setVolume?.(volume));
     },
     update() {
       handleInput();
@@ -94,7 +103,8 @@ export function install(game) {
 
   const hud = createHud(ui, game);
   const touch = createTouch(ui, game);
-  const panels = createPanels(ui, game);
+  // 처음 화면에서 연 도움말을 닫으면 포커스를 처음 화면 단추로 돌려준다 (title 은 아래에서 만든다)
+  const panels = createPanels(ui, game, { onClose: () => title.visible && title.focus() });
   const dlg = createDialogue(ui, game);
   const title = createTitle(ui, game);
   ui.hud = hud;
@@ -158,16 +168,20 @@ export function install(game) {
   // ---------------------------------------------------------------- 배너 (미션 시작·완료)
   const bannerQ = [];
   let bannerCur = null;
-  let bannerCount = 0;
+  let extBanners = 0; // 다른 모듈이 banner() 를 부른 횟수 (UI 가 스스로 띄운 것은 세지 않는다)
+  let frameStamp = 0; // 지난 프레임 끝의 extBanners
   let lastBanner = { title: '', t: -99 };
   function banner(titleText, subtitle = '', seconds = 3.2, seal = '印') {
+    if (showBanner(titleText, subtitle, seconds, seal)) extBanners++;
+  }
+  function showBanner(titleText, subtitle = '', seconds = 3.2, seal = '印') {
     titleText = String(titleText ?? '');
-    if (!titleText) return;
-    if (lastBanner.title === titleText && clock - lastBanner.t < 2.5) return; // 같은 배너 겹침 방지
+    if (!titleText) return false;
+    if (lastBanner.title === titleText && clock - lastBanner.t < 2.5) return false; // 같은 배너 겹침 방지
     lastBanner = { title: titleText, t: clock };
-    bannerCount++;
     bannerQ.push({ title: titleText, subtitle: subtitle ? String(subtitle) : '', seconds: Math.max(1, Number(seconds) || 3.2), seal });
     if (bannerQ.length > 3) bannerQ.shift();
+    return true;
   }
   function tickBanner() {
     if (!bannerCur && bannerQ.length) {
@@ -195,7 +209,8 @@ export function install(game) {
     }
   }
 
-  // 미션 이벤트 → 배너. 미션 시스템이 직접 banner() 를 부르면 그쪽이 우선(같은 틱 안에 불리면 생략)
+  // 미션 이벤트 → 배너. 미션 시스템이 이벤트 앞뒤로(같은 프레임 안에) 직접 banner() 를 부르면 그쪽이 우선.
+  // 미션 끝 → 다음 미션 시작이 한 프레임에 겹쳐도 둘 다 띄운다 (UI 가 띄운 배너는 '남이 띄움' 으로 치지 않는다).
   const pendingMB = [];
   function missionTitle(id) {
     const m = game.sys.missions;
@@ -211,34 +226,40 @@ export function install(game) {
     if (r.honor) out.push(`의 ${r.honor > 0 ? '+' : ''}${r.honor}`);
     return out.join(' · ');
   }
-  game.on('mission:start', (p) => pendingMB.push({ kind: 'start', p: p || {}, stamp: bannerCount }));
-  game.on('mission:complete', (p) => pendingMB.push({ kind: 'complete', p: p || {}, stamp: bannerCount }));
-  game.on('mission:fail', (p) => pendingMB.push({ kind: 'fail', p: p || {}, stamp: bannerCount }));
+  game.on('mission:start', (p) => pendingMB.push({ kind: 'start', p: p || {}, stamp: frameStamp }));
+  game.on('mission:complete', (p) => pendingMB.push({ kind: 'complete', p: p || {}, stamp: frameStamp }));
+  game.on('mission:fail', (p) => pendingMB.push({ kind: 'fail', p: p || {}, stamp: frameStamp }));
   function tickMissionBanners() {
     while (pendingMB.length) {
       const e = pendingMB.shift();
-      if (bannerCount !== e.stamp) continue; // 이미 누군가 배너를 띄웠다
+      if (extBanners !== e.stamp) continue; // 미션 쪽이 이미 배너를 띄웠다
       const { title: t, chapter } = missionTitle(e.p.id);
-      if (e.kind === 'start') banner(t, chapter ? `제${chapter}장` : '새 이야기', 3.4, '始');
+      if (e.kind === 'start') showBanner(t, chapter ? `제${chapter}장` : '새 이야기', 3.4, '始');
       else if (e.kind === 'complete') {
         const rw = rewardText(e.p.rewards);
-        banner(t, rw ? `이야기를 마쳤다 — ${rw}` : '이야기를 마쳤다', 3.8, '完');
-      } else banner('그르쳤다', e.p.reason ? String(e.p.reason) : t, 3.4, '敗');
+        showBanner(t, rw ? `이야기를 마쳤다 — ${rw}` : '이야기를 마쳤다', 3.8, '完');
+      } else showBanner('그르쳤다', e.p.reason ? String(e.p.reason) : t, 3.4, '敗');
     }
+    frameStamp = extBanners;
   }
 
   // ---------------------------------------------------------------- 암전
   let fadeTimer = null;
+  let fadeResolve = null;
   function fade(toBlack, ms = 600) {
-    const d = reducedMotion() ? Math.min(ms, 120) : Math.max(0, Number(ms) || 0);
+    const d = reducedMotion() ? Math.min(Number(ms) || 0, 120) : Math.max(0, Number(ms) || 0);
     fadeEl.style.transitionDuration = `${d}ms`;
     void fadeEl.offsetWidth;
     fadeEl.style.opacity = toBlack ? '1' : '0';
     setClass(fadeEl, 'jx-on', !!toBlack);
+    // 앞선 암전이 끝나기 전에 새로 불리면 앞의 약속은 바로 끝낸다 (기다리던 쪽이 멈추지 않게)
     if (fadeTimer) clearTimeout(fadeTimer);
+    if (fadeResolve) fadeResolve();
     return new Promise((res) => {
+      fadeResolve = res;
       fadeTimer = setTimeout(() => {
         fadeTimer = null;
+        fadeResolve = null;
         res();
       }, d + 16);
     });
@@ -258,16 +279,20 @@ export function install(game) {
   }
 
   // ---------------------------------------------------------------- 소리 크기 (+ 첫 입력에서 오디오 깨우기)
-  function getVolume() {
-    if (volume != null) return volume;
+  // 소리 시스템이 스스로 크기를 기억하면 그 값을 믿는다. 없을 때만 UI 가 따로 기억해 둔다.
+  function audioVolume() {
     const a = game.sys.audio;
-    const v = Number(a?.volume ?? a?.master ?? a?.masterVolume);
-    return isFinite(v) ? clamp01(v) : 0.8;
+    const v = Number(a?.volume ?? a?.masterVolume ?? a?.master);
+    return isFinite(v) ? clamp01(v) : null;
+  }
+  function getVolume() {
+    return audioVolume() ?? volume ?? 0.8;
   }
   function setVolume(v) {
     volume = clamp01(Number(v) || 0);
-    lsSet('volume', volume);
-    safe(() => game.sys.audio?.setVolume?.(volume));
+    const a = game.sys.audio;
+    if (typeof a?.setVolume === 'function') safe(() => a.setVolume(volume));
+    else lsSet('volume', volume);
   }
   let unlocked = false;
   function unlockAudio() {
@@ -276,7 +301,16 @@ export function install(game) {
     if (typeof a?.unlock !== 'function') return;
     unlocked = true;
     safe(() => a.unlock());
-    if (volume != null) safe(() => a.setVolume?.(volume));
+  }
+
+  // ---------------------------------------------------------------- 저장·불러오기 (알림이 겹치지 않게)
+  // save 시스템이 스스로 알림을 띄우면 그대로 두고, 아무 말이 없을 때만 UI 가 알린다.
+  let notifyCount = 0;
+  function withNotice(fn, okText, failText) {
+    const before = notifyCount;
+    const ok = !!safe(fn, false);
+    if (notifyCount === before) toast(ok ? okText : failText, ok ? 'good' : 'warn');
+    return ok;
   }
   function setTouch(on) {
     if (on === isTouch) return;
@@ -305,6 +339,7 @@ export function install(game) {
 
   // ---------------------------------------------------------------- 알림
   game.on('notify', (p) => {
+    notifyCount++;
     if (typeof p === 'string') toast(p);
     else toast(p?.text, p?.kind);
   });
@@ -359,21 +394,41 @@ export function install(game) {
   }
 
   // ---------------------------------------------------------------- 매 프레임 (화면 렌더러, 멈춤 중에도 불린다)
+  // 단계마다 따로 감싼다: 코어는 화면 렌더러 오류를 한 번만 찍고 그 뒤 프레임을 통째로 건너뛰므로,
+  // 예컨대 HUD 가 다른 시스템 값 때문에 던지면 대화창 타자기·패널까지 멈춰 게임이 잠긴다.
+  const stepErr = new Set();
+  function step(name, fn) {
+    try {
+      fn();
+    } catch (err) {
+      if (stepErr.has(name)) return;
+      stepErr.add(name);
+      console.error(`[ui ${name}]`, err);
+    }
+  }
   function frame(ctx, dt) {
     dt = Math.min(0.1, Math.max(0, dt || 0));
     clock += dt;
     const playing = game.state === 'play' && !title.visible;
-    hud.setVisible(playing);
-    hud.setDim(game.paused || dlg.active);
-    hud.update(dt);
-    if (playing) hud.drawOverlay(ctx, dt);
-    tickMissionBanners();
-    tickToasts();
-    tickBanner();
-    dlg.tick(dt);
-    panels.frame(dt);
-    title.frame(dt);
-    touch.frame(dt, playing && !panels.current && !dlg.active && !game.paused);
+    step('hud', () => {
+      hud.setVisible(playing);
+      hud.setDim(game.paused || dlg.active);
+      hud.update(dt);
+    });
+    if (playing) {
+      ctx.save();
+      step('overlay', () => hud.drawOverlay(ctx, dt));
+      ctx.restore();
+    }
+    step('banner', () => {
+      tickMissionBanners();
+      tickBanner();
+    });
+    step('toast', tickToasts);
+    step('dialogue', () => dlg.tick(dt));
+    step('panel', () => panels.frame(dt));
+    step('title', () => title.frame(dt));
+    step('touch', () => touch.frame(dt, playing && !panels.current && !dlg.active && !game.paused));
     // 길잡이 점에 다다르면 지운다
     const wp = game.waypoint, p = game.player;
     if (playing && wp && p && Math.hypot(wp.x - p.x, wp.y - p.y) < 8) {

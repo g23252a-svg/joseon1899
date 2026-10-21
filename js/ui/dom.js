@@ -121,7 +121,8 @@ export function josa(word, withBatchim, without) {
   return `${w}${withBatchim}(${without})`;
 }
 
-export const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+/** 0~1 로 자르기. NaN·undefined 는 0 (게이지·막대에 NaN 이 번지지 않게) */
+export const clamp01 = (v) => (v > 0 ? (v < 1 ? v : 1) : 0);
 
 /** (x0,y0) 에서 (x1,y1) 쪽 방위 (화면 위 = 북) */
 export function dirWord(x0, y0, x1, y1) {

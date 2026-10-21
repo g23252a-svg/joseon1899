@@ -5,12 +5,14 @@
 //   game.sys.save.hasSave(slot='auto') · clear(slot) · list() → [{slot, savedAt, day, hour, region, money}] · info(slot)
 //   자동 저장: 'mission:complete' 직후, 그리고 실시간 3분마다(플레이 중, 살아 있고 수배 중이 아닐 때). 자동 저장은 조용히.
 //   localStorage 키 'joseon1899:'+slot. 접근은 모두 try/catch — 저장소가 막히면 이번 세션 메모리에만 보관한다.
-//   이벤트 'save:done' {slot, auto}, 'save:load' {slot}
+//   자동 저장은 물 위(헤엄·배)에서는 미룬다. 불러올 때 설 수 없는 자리(깊은 물·지도 밖)면 가까운 뭍으로 옮긴다.
+//   이벤트 'save:done' {slot, auto}, 'save:beforeLoad' {slot}, 'save:load' {slot}
 
 import { clamp } from '../engine/util.js';
 
 export const SAVE_VERSION = 1;
 const PREFIX = 'joseon1899:';
+const slotName = (s) => String(s ?? 'auto'); // 키·이벤트·캐시가 같은 이름을 쓰게
 
 function makeStore() {
   const mem = new Map();
@@ -24,13 +26,15 @@ function makeStore() {
   return {
     persistent: true,
     get(k) {
+      // 이번 세션에 쓴 값이 가장 새것이다 (용량 초과로 setItem 이 실패했어도 옛 저장을 읽지 않게)
+      if (mem.has(k)) return mem.get(k);
       try {
         const v = ls()?.getItem(k);
         if (v != null) return v;
       } catch {
         /* 막힘 */
       }
-      return mem.has(k) ? mem.get(k) : null;
+      return null;
     },
     set(k, v) {
       mem.set(k, v);
@@ -90,14 +94,16 @@ class SaveSystem {
   }
 
   key(slot = 'auto') {
-    return PREFIX + String(slot ?? 'auto');
+    return PREFIX + slotName(slot);
   }
 
   // ------------------------------------------------------------ 저장
 
   save(slot = 'auto', opts = {}) {
     const g = this.game;
-    const data = { version: SAVE_VERSION, slot: String(slot), savedAt: Date.now(), meta: {}, systems: {}, flags: {}, player: null };
+    slot = slotName(slot);
+    opts = opts || {};
+    const data = { version: SAVE_VERSION, slot, savedAt: Date.now(), meta: {}, systems: {}, flags: {}, player: null };
     for (const s of g.systems) {
       if (!s || s === this || !s.name || typeof s.serialize !== 'function') continue;
       try {
@@ -127,6 +133,7 @@ class SaveSystem {
         crouching: !!p.crouching,
         walkMode: !!p.walkMode,
         name: p.name,
+        vehicle: p.vehicle ? { vtype: p.vehicle.vtype ?? null, moveMode: p.vehicle.moveMode ?? null } : null,
       };
     }
     const tm = g.sys.time;
@@ -154,12 +161,12 @@ class SaveSystem {
       return false;
     }
     this.store.set(this.key(slot), json);
-    this._known.set(String(slot), true);
-    this.lastSlot = String(slot);
+    this._known.set(slot, true);
+    this.lastSlot = slot;
     this.lastSaveAt = data.savedAt;
     this._since = 0;
     if (!opts.quiet) g.notify(this.store.persistent ? '저장했습니다' : '저장했습니다 (이 창을 닫으면 사라집니다)', 'good');
-    g.emit('save:done', { slot: String(slot), auto: !!opts.auto });
+    g.emit('save:done', { slot, auto: !!opts.auto });
     return true;
   }
 
@@ -178,12 +185,14 @@ class SaveSystem {
 
   load(slot = 'auto', opts = {}) {
     const g = this.game;
+    slot = slotName(slot);
+    opts = opts || {};
     const data = this._read(slot);
     if (!data) {
       if (!opts.quiet) g.notify('불러올 저장이 없습니다', 'warn');
       return false;
     }
-    g.emit('save:beforeLoad', { slot: String(slot) });
+    g.emit('save:beforeLoad', { slot });
     const sys = data.systems || {};
     for (const s of g.systems) {
       if (!s || s === this || !s.name || typeof s.deserialize !== 'function') continue;
@@ -200,10 +209,11 @@ class SaveSystem {
     Object.assign(g.flags, data.flags || {});
     this._restorePlayer(data.player);
     this.loaded = true;
-    this.lastSlot = String(slot);
+    this.lastSlot = slot;
     this._since = 0;
+    this._pending = 0;
     if (!opts.quiet) g.notify('불러왔습니다', 'good');
-    g.emit('save:load', { slot: String(slot) });
+    g.emit('save:load', { slot });
     return true;
   }
 
@@ -228,8 +238,10 @@ class SaveSystem {
     p.state = 'normal';
     p.hp = hp;
     p.solid = true;
-    p.x = d.x;
-    p.y = d.y;
+    // 배 위·깊은 물·지도 밖에서 저장했으면 가까운 뭍으로 옮긴다 (탈것은 다시 만들지 않으므로)
+    const spot = this._landSpot(d.x, d.y);
+    p.x = spot.x;
+    p.y = spot.y;
     p.vx = p.vy = 0;
     p.moveX = p.moveY = 0;
     if (Number.isFinite(d.angle)) p.angle = d.angle;
@@ -239,10 +251,46 @@ class SaveSystem {
     g.camera?.snap?.(p.x, p.y);
   }
 
+  /** 걸어서 설 수 있는 가까운 자리 (못 찾으면 world.spawn, 그것도 없으면 그대로) */
+  _landSpot(x, y) {
+    const w = this.game.world;
+    if (!w) return { x, y };
+    const size = w.size;
+    if (size && Number.isFinite(size.w) && Number.isFinite(size.h)) {
+      x = clamp(x, 1, Math.max(1, size.w - 1));
+      y = clamp(y, 1, Math.max(1, size.h - 1));
+    }
+    const ok = (px, py) => {
+      try {
+        if (w.isDeepWater?.(px, py)) return false;
+        return w.passable?.(px, py, 'foot') !== false;
+      } catch {
+        return true;
+      }
+    };
+    if (ok(x, y)) return { x, y };
+    try {
+      const q = w.randomPassableNear?.(x, y, 60, 'foot');
+      if (q && Number.isFinite(q.x) && Number.isFinite(q.y) && ok(q.x, q.y)) return { x: q.x, y: q.y };
+    } catch {
+      /* 없음 */
+    }
+    for (let r = 4; r <= 200; r += 4) {
+      const n = Math.max(8, Math.round(r * 0.8));
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+        if (ok(px, py)) return { x: px, y: py };
+      }
+    }
+    const sp = w.spawn;
+    return sp && Number.isFinite(sp.x) && Number.isFinite(sp.y) ? { x: sp.x, y: sp.y } : { x, y };
+  }
+
   // ------------------------------------------------------------ 조회
 
   hasSave(slot = 'auto') {
-    const k = String(slot ?? 'auto');
+    const k = slotName(slot);
     if (this._known.has(k)) return this._known.get(k);
     const ok = !!this._read(k);
     this._known.set(k, ok);
@@ -251,8 +299,9 @@ class SaveSystem {
 
   /** 저장 요약 {slot, savedAt, day, hour, weather, region, money, playSeconds, mission} | null */
   info(slot = 'auto') {
+    slot = slotName(slot);
     const d = this._read(slot);
-    return d ? { slot: String(slot), savedAt: d.savedAt, ...(d.meta || {}) } : null;
+    return d ? { ...(d.meta || {}), slot, savedAt: d.savedAt } : null;
   }
 
   list() {
@@ -266,8 +315,9 @@ class SaveSystem {
   }
 
   clear(slot = 'auto') {
+    slot = slotName(slot);
     this.store.del(this.key(slot));
-    this._known.set(String(slot ?? 'auto'), false);
+    this._known.set(slot, false);
     return true;
   }
 
@@ -282,6 +332,7 @@ class SaveSystem {
     if (!this._alive() || g.paused || p.state !== 'normal') return false;
     if ((g.sys.wanted?.level ?? 0) > 0) return false; // 수배 중엔 저장하지 않는다
     if (g.cameraTarget) return false; // 연출 중
+    if (p.swimming || p.vehicle?.moveMode === 'boat') return false; // 물 위 (탈것은 다시 만들지 않는다)
     return true;
   }
 
@@ -310,8 +361,8 @@ class SaveSystem {
     this._play += realDt;
     this._since += realDt;
     if (this._pending > 0 && (this._pending -= realDt) <= 0) {
-      if (this._alive()) this.save('auto', { quiet: true, auto: true });
-      else this._pending = 2; // 살아날 때까지 다시 시도
+      if (this._canAutosave()) this.save('auto', { quiet: true, auto: true });
+      else this._pending = 2; // 살아나거나 수배가 풀리거나 뭍에 오를 때까지 다시 시도
     }
     if (this.autosave && this._since >= this.autosaveSeconds) {
       if (this._canAutosave()) this.save('auto', { quiet: true, auto: true });

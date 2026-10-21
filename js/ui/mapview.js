@@ -195,11 +195,12 @@ export function createMapView(c) {
     // 지도 밖은 짙은 한지, 안은 지도 그림
     ctx.fillStyle = mixHex(PAL.paperDeep, PAL.paperShade, 0.5);
     ctx.fillRect(0, 0, W, H);
-    const img = getMapImage(game);
+    const img = getMapImage(game, 10);
     if (img) {
       const k = s / img.scale; // 지도 px 당 화면 px
       ctx.imageSmoothingEnabled = true;
       drawImageClipped(ctx, img.canvas, -ox / k, -oy / k, W / k, H / k, 0, 0, W, H);
+      if (!img.done) dirty = true; // 아직 그리는 중: 다음 프레임에 이어서
     }
     ctx.fillStyle = rgba(PAL.paper, 0.1);
     ctx.fillRect(ox, oy, size.w * s, size.h * s);

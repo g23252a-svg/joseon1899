@@ -665,7 +665,7 @@ export class Terrain {
             const rk = r00 + (r10 - r00) * tx + (r01 - r00) * ty + (r00 - r10 - r01 + r11) * tx * ty;
             const thr = 0.6 + (1 - rk) * 0.4;
             const crag = texAt(tex, cx * 0.45 + 90, cy * 0.45 + 13);
-            if ((hh > thr && crag > 0.42) || (hh > 0.42 && crag > 0.86 - rk * 0.12)) g[idx] = T.ROCK;
+            if ((hh > thr && crag > 0.52) || (hh > 0.42 && crag > 0.86 - rk * 0.12)) g[idx] = T.ROCK;
           }
         }
       }
@@ -775,12 +775,12 @@ export class Terrain {
   step_yards() {
     for (const s of this.map.settlements || []) {
       const city = s.kind === 'city';
-      const rr = s.r * (city ? 0.9 : s.kind === 'camp' ? 0.8 : 0.5);
+      const rr = s.r * (city ? 0.9 : s.kind === 'camp' ? 0.8 : 0.36);
       const cn = this.cn;
       this.paintCircle(s.x, s.y, rr, city ? 26 : 9, (i, t, cx, cy, dn) => {
         if (t !== T.GRASS && t !== T.FIELD && t !== T.FOREST && t !== T.SAND) return -1;
         const n = cn[i] / 255;
-        return n > (city ? 0.3 : 0.18) + dn * 0.25 ? T.YARD : -1;
+        return n > (city ? 0.1 + dn * 0.22 : 0.3 + dn * 0.3) ? T.YARD : -1;
       });
     }
   }

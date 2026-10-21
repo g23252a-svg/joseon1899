@@ -92,6 +92,7 @@ export function buildCSS() {
 .jx-root :focus-visible { outline: 2px solid var(--jx-seal); outline-offset: 2px; }
 :where(.jx-root) :where(h1, h2, h3, h4, p) { margin: 0; font-weight: 400; }
 .jx-gone { display: none !important; }
+:where(.jx-root) * { scrollbar-width: thin; scrollbar-color: ${inkA(0.4)} transparent; }
 .jx-sr { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ---------- 바탕 재질 ---------- */
@@ -169,9 +170,9 @@ export function buildCSS() {
 .jx-region { font-family: var(--jx-display); font-size: 18px; letter-spacing: 0.04em; }
 .jx-clock { font-size: 13px; color: var(--jx-ink2); }
 
-.jx-obj { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); max-width: min(44vw, 540px); display: flex; align-items: center; gap: 10px; font-size: 16px; text-shadow: var(--jx-halo); white-space: nowrap; transition: opacity 0.3s; }
+.jx-obj { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); max-width: min(calc(100% - 680px), 560px); display: flex; align-items: center; gap: 10px; font-size: 16px; line-height: 1.4; text-shadow: var(--jx-halo); transition: opacity 0.3s; }
 .jx-obj-mark { flex: none; width: 16px; height: 16px; transform: rotate(45deg); }
-.jx-obj-text { overflow: hidden; text-overflow: ellipsis; position: relative; padding-bottom: 3px; }
+.jx-obj-text { position: relative; padding-bottom: 4px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 .jx-obj-text::after { content: ''; position: absolute; left: 0; right: 8%; bottom: 0; height: 2px; background: linear-gradient(90deg, ${inkA(0.75)}, ${inkA(0.15)}); }
 .jx-obj.jx-flash .jx-obj-text { animation: jx-bleed-in 0.9s ease-out; }
 
@@ -187,7 +188,7 @@ export function buildCSS() {
 .jx-veh-bar > i { display: block; height: 100%; background: var(--jx-indigo); transform-origin: left; }
 .jx-veh-bar.jx-low > i { background: var(--jx-seal); }
 
-.jx-toasts { position: absolute; right: 14px; top: 40%; width: min(330px, 72vw); display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; z-index: 3; }
+.jx-toasts { position: absolute; right: 14px; top: max(40%, 252px); width: min(330px, 72vw); display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; z-index: 3; }
 .jx-toast { max-width: 100%; padding: 7px 12px 8px 14px; font-size: 15px; line-height: 1.4; background: ${paperA(0.95)} var(--jx-noise); border-left: 4px solid var(--jx-ink); box-shadow: 3px 3px 0 ${inkA(0.12)}, 0 0 0 1px ${inkA(0.12)}; animation: jx-toast-in 0.3s ease-out both; }
 .jx-toast[data-kind='good'] { border-left-color: var(--jx-green); }
 .jx-toast[data-kind='warn'] { border-left-color: var(--jx-gold); }
@@ -228,6 +229,8 @@ export function buildCSS() {
 .jx-choices { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
 .jx-choice { display: flex; align-items: center; gap: 12px; width: 100%; padding: 7px 10px; font-size: 16px; border-left: 3px solid transparent; }
 .jx-choice:hover, .jx-choice.jx-hi { background: ${inkA(0.07)}; border-left-color: var(--jx-seal); }
+.jx-choice:focus-visible { outline: none; }
+.jx-choice.jx-hi:focus-visible { box-shadow: inset 0 0 0 1px ${rgba(PAL.seal, 0.55)}; }
 .jx-choice .jx-key { min-width: 26px; height: 26px; font-size: 13px; }
 
 /* ---------- 패널 (두루마리) ---------- */
@@ -248,6 +251,7 @@ export function buildCSS() {
 .jx-tab small { font-family: var(--jx-display); font-size: 11px; letter-spacing: 0.25em; line-height: 1.2; }
 .jx-tab span { font-size: 16px; white-space: nowrap; }
 .jx-tab:hover { color: var(--jx-ink2); }
+.jx-tab:focus-visible { outline-offset: -4px; }
 .jx-tab[aria-selected='true'] { color: var(--jx-ink); }
 .jx-tab[aria-selected='true']::after { content: ''; position: absolute; left: 14%; right: 14%; bottom: 1px; height: 7px; background: var(--jx-seal); clip-path: polygon(0 55%, 6% 10%, 55% 0, 100% 30%, 97% 85%, 45% 100%, 4% 95%); z-index: 1; }
 .jx-head-side { display: flex; align-items: center; gap: 10px; margin-left: auto; padding-bottom: 8px; flex: none; }
@@ -269,10 +273,11 @@ export function buildCSS() {
 .jx-inv { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 20px; height: 100%; }
 .jx-inv.jx-solo { grid-template-columns: minmax(0, 1fr); }
 .jx-inv.jx-solo .jx-detail { display: none; }
-.jx-inv-list { min-height: 0; overflow: auto; padding-right: 4px; touch-action: pan-y; }
-.jx-cat { margin-bottom: 16px; }
-.jx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 6px; }
-.jx-cell { position: relative; aspect-ratio: 1; display: grid; place-items: center; background: ${rgba(PAL.paperDeep, 0.55)}; box-shadow: inset 0 0 0 1px ${inkA(0.22)}; transition: background-color 0.12s; }
+.jx-inv-list { min-height: 0; overflow: auto; padding-right: 4px; touch-action: pan-y; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 4px 24px; }
+.jx-cat { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-bottom: 12px; }
+.jx-cat .jx-sec-h { white-space: nowrap; }
+.jx-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.jx-cell { position: relative; width: 70px; height: 70px; flex: none; display: grid; place-items: center; background: ${rgba(PAL.paperDeep, 0.55)}; box-shadow: inset 0 0 0 1px ${inkA(0.22)}; transition: background-color 0.12s; }
 .jx-cell:hover { background: var(--jx-paper2); }
 .jx-cell[aria-pressed='true'] { background: var(--jx-paper); box-shadow: inset 0 0 0 2px var(--jx-ink); }
 .jx-cell canvas { width: 42px; height: 42px; }
@@ -313,7 +318,8 @@ export function buildCSS() {
 .jx-node[data-st='open'] .jx-dot { color: var(--jx-seal); }
 .jx-node[data-st='locked'] { color: var(--jx-ink3); }
 .jx-node[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--jx-paper), 0 0 0 4px var(--jx-seal); }
-.jx-skill-detail { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px 20px; margin-top: 20px; padding-top: 14px; border-top: 1px solid ${inkA(0.22)}; }
+.jx-skill-detail { position: sticky; bottom: -18px; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px 20px; margin: 20px -4px 0; padding: 14px 4px 16px; border-top: 2px solid var(--jx-ink); background: var(--jx-paper) var(--jx-noise); box-shadow: 0 -10px 14px -8px ${rgba(PAL.paperShade, 0.9)}; }
+.jx-skill-detail .jx-desc { margin-top: 4px; }
 .jx-skill-detail > div { flex: 1 1 260px; min-width: 0; }
 .jx-skill-detail h3 { font-family: var(--jx-display); font-size: 21px; }
 
@@ -349,6 +355,7 @@ export function buildCSS() {
 .jx-srow .jx-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jx-srow .jx-nm small { margin-left: 6px; color: var(--jx-ink3); font-size: 12px; }
 .jx-price { font-family: var(--jx-display); white-space: nowrap; }
+.jx-price.jx-lack { color: var(--jx-seal); }
 .jx-trade { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding-top: 12px; border-top: 2px solid var(--jx-ink); min-height: 58px; }
 .jx-trade-name { font-family: var(--jx-display); font-size: 18px; min-width: 0; flex: 1 1 140px; }
 .jx-qty { display: flex; align-items: center; gap: 2px; }
@@ -384,7 +391,7 @@ export function buildCSS() {
 .jx-title-art { position: relative; display: flex; flex-direction: row-reverse; align-items: flex-start; gap: clamp(10px, 2vw, 30px); padding: clamp(26px, 7vh, 84px) clamp(20px, 6vw, 100px) 0 0; grid-column: 2; grid-row: 1; }
 .jx-title-main { margin: 0; writing-mode: vertical-rl; text-orientation: upright; font-family: var(--jx-display); font-weight: 400; font-size: clamp(60px, 13vh, 136px); line-height: 1; letter-spacing: 0.04em; color: var(--jx-ink); animation: jx-bleed 1.6s 0.2s ease-out both; }
 .jx-title-main .jx-year { font-size: 0.74em; letter-spacing: -0.02em; margin-inline-start: 0.32em; }
-.jx-title-sub { margin: clamp(36px, 9vh, 110px) 0 0; writing-mode: vertical-rl; text-orientation: upright; letter-spacing: 0; font-family: var(--jx-brush); font-size: clamp(20px, 3.6vh, 34px); line-height: 1.1; color: var(--jx-ink2); animation: jx-bleed 1.6s 0.7s ease-out both; }
+.jx-title-sub { margin: clamp(36px, 9vh, 110px) 0 0; writing-mode: vertical-rl; text-orientation: upright; letter-spacing: 0; word-spacing: -0.3em; white-space: nowrap; font-family: var(--jx-brush); font-size: clamp(20px, 3.6vh, 34px); line-height: 1.1; color: var(--jx-ink2); animation: jx-bleed 1.6s 0.7s ease-out both; }
 .jx-title-seal { width: 58px; height: 58px; font-size: 21px; writing-mode: vertical-rl; letter-spacing: 2px; transform: rotate(-5deg); animation: jx-stamp 0.55s 1.3s cubic-bezier(0.2, 1.5, 0.4, 1) both; }
 .jx-title-menu { grid-column: 1; grid-row: 1; align-self: end; display: flex; flex-direction: column; gap: 10px; width: min(330px, calc(100% - 32px)); padding: 0 0 clamp(26px, 8vh, 84px); margin-left: clamp(16px, 6vw, 100px); animation: jx-fadein 1s 0.9s ease-out both; }
 .jx-title-menu .jx-btn { justify-content: space-between; min-height: 52px; font-size: 18px; }
@@ -402,11 +409,15 @@ export function buildCSS() {
 .jx-tbtn.jx-big { width: 80px; height: 80px; font-size: 16px; color: var(--jx-paper); background: ${inkA(0.74)} var(--jx-noise); }
 .jx-tbtn.jx-held { background-color: var(--jx-ink); color: var(--jx-paper); transform: scale(0.94); }
 .jx-tbtn.jx-gold { box-shadow: inset 0 0 0 2px var(--jx-gold); }
-.jx-tmenu { position: absolute; left: 14px; top: 84px; pointer-events: auto; min-height: 38px; padding: 2px 12px; font-size: 14px; }
 .jx-touch-on .jx-prompts { bottom: 252px; }
 .jx-touch-on .jx-prompt { pointer-events: auto; }
 .jx-touch-on .jx-veh { bottom: 252px; }
 .jx-touch-on .jx-debug { bottom: auto; top: 130px; }
+
+/* ---------- 중간 폭: 목표 줄을 왼쪽 HUD 아래로 ---------- */
+@media (max-width: 1099px) {
+  .jx-obj { top: 112px; left: 14px; transform: none; max-width: calc(100% - 232px); }
+}
 
 /* ---------- 좁은 화면 ---------- */
 @media (max-width: 639px) {
@@ -417,10 +428,17 @@ export function buildCSS() {
   .jx-mini { width: 112px; height: 112px; }
   .jx-region { font-size: 14px; }
   .jx-clock { font-size: 12px; }
-  .jx-obj { top: 64px; left: 10px; transform: none; max-width: calc(100% - 150px); font-size: 14px; }
-  .jx-toasts { top: 210px; right: 10px; }
+  .jx-obj { top: 100px; left: 10px; transform: none; max-width: calc(100% - 150px); font-size: 14px; gap: 8px; }
+  .jx-obj-mark { width: 12px; height: 12px; }
+  .jx-stamp { width: 17px; height: 25px; font-size: 9px; }
+  .jx-toasts { top: 172px; right: 10px; }
+  .jx-toast { font-size: 14px; padding: 6px 10px 7px 12px; }
   .jx-prompt { font-size: 14px; }
-  .jx-veh { right: 10px; }
+  .jx-prompts { bottom: 18px; }
+  .jx-veh { right: 10px; bottom: 16px; }
+  .jx-hud.jx-riding .jx-prompts { bottom: 104px; }
+  .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 336px; }
+  .jx-banner { top: 24%; }
   .jx-veh-gait { font-size: 28px; }
   .jx-panel { width: 100%; height: 100%; padding: 0; box-shadow: none; animation: none; }
   .jx-panel::before, .jx-panel::after { display: none; }
@@ -433,22 +451,36 @@ export function buildCSS() {
   .jx-panel-title { font-size: 20px; }
   .jx-panel-body { padding: 14px 12px; }
   .jx-inv { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; gap: 10px; }
+  .jx-inv-list { gap: 2px 16px; }
+  .jx-cell { width: 62px; height: 62px; }
+  .jx-cell canvas { width: 38px; height: 38px; }
   .jx-detail { padding: 10px 0 0; border-left: 0; border-top: 1px solid ${inkA(0.22)}; max-height: 46%; }
   .jx-shop { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) auto; }
   .jx-pause { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .jx-help table { font-size: 13px; }
   .jx-title { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
-  .jx-title-art { grid-column: 1; grid-row: 1; justify-content: center; padding: 30px 16px 0; }
+  .jx-title-art { grid-column: 1; grid-row: 1; justify-content: center; padding: clamp(20px, 5vh, 40px) 16px 0; min-height: 0; overflow: hidden; }
+  .jx-title-main { font-size: clamp(44px, min(8.5vh, 15vw), 96px); }
+  .jx-title-sub { margin-top: clamp(24px, 6vh, 60px); font-size: clamp(18px, min(3.2vh, 6vw), 28px); }
+  .jx-title-seal { width: 48px; height: 48px; font-size: 18px; }
   .jx-title-menu { grid-row: 2; width: auto; margin: 0 16px; padding-bottom: 22px; }
   .jx-dlg { padding: 20px 16px 26px; }
   .jx-dlg-portrait { width: 48px; height: 48px; font-size: 28px; }
 }
 @media (max-height: 520px) and (orientation: landscape) {
-  .jx-title-main { font-size: clamp(48px, 15vh, 90px); }
-  .jx-title-sub { margin-top: 30px; font-size: 22px; }
+  .jx-title-art { padding-top: 18px; }
+  .jx-title-main { font-size: clamp(36px, 11vh, 80px); }
+  .jx-title-sub { margin-top: 24px; font-size: clamp(16px, 4.6vh, 22px); }
+  .jx-title-seal { width: 44px; height: 44px; font-size: 16px; }
   .jx-title-menu .jx-btn { min-height: 42px; font-size: 16px; }
   .jx-tbtns { transform: scale(0.82); transform-origin: right bottom; }
   .jx-touch-on .jx-prompts, .jx-touch-on .jx-veh { bottom: 200px; }
+}
+@media (max-width: 479px) {
+  .jx-tbtns { transform: scale(0.86); transform-origin: right bottom; }
+  .jx-stick-zone { width: 52%; }
+  .jx-touch-on .jx-prompts, .jx-touch-on .jx-veh { bottom: 220px; }
+  .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 300px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .jx-root *, .jx-root *::before, .jx-root *::after { animation: none !important; transition: none !important; }

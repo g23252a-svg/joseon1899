@@ -2,7 +2,8 @@
 //
 //   game.sys.time.hour(0~24 실수) .day .minutesPerDay(실시간 분, 기본 48) .light(0~1) .weather .wind{angle, strength}
 //   isNight()  setHour(h)  skip(hours)  curfew()  setWeather(w, {instant, lock})
-//   이벤트 'time:hour' {hour, day} · 'time:day' {day} · 'weather:change' {weather, prev}
+//   이벤트 'time:hour' {hour, day, set?} · 'time:day' {day} · 'weather:change' {weather, prev}
+//     (set: true 는 setHour·불러오기로 시각을 '맞춘' 경우 — 흘러서 지난 정시가 아님)
 //   game.lights: 다른 모듈이 {x, y, r, color?, intensity?, on?} 를 넣으면 밤에 그 자리가 밝아진다.
 //   wind.angle 은 바람이 '불어 가는' 방향(라디안, 0=동, +는 시계방향). 늦봄 기본은 남서풍(북동쪽으로 붊).
 //
@@ -36,7 +37,7 @@ const FX = {
   snow: { cloud: 0.85, rain: 0, fog: 0.15, storm: 0, snow: 0.8 },
 };
 const WIND = { clear: 0.28, cloudy: 0.42, rain: 0.55, storm: 0.92, fog: 0.06, snow: 0.4 };
-const NO_WINDOW = new Set(['wall', 'gate', 'ruin', 'tomb', 'pagoda', 'well', 'bridge', 'stele', 'jangseung', 'shrine_small']);
+const NO_WINDOW = new Set(['wall', 'gate', 'ruin', 'tomb', 'pagoda', 'well', 'bridge', 'stele', 'jangseung', 'shrine_small', 'pavilion']);
 
 /** 해의 밝기 0(밤)~1(낮). 늦봄: 해 뜸 ≈ 5:30, 해 짐 ≈ 19:40 */
 export function lightAt(h) {
@@ -143,7 +144,8 @@ class TimeSystem {
     this._lastAbs = this._abs();
     this.light = lightAt(this.hour);
     this._snapFx();
-    this.game.emit('time:hour', { hour: Math.floor(this.hour), day: this.day });
+    // set: 흘러서 온 정시가 아니라 맞춘 시각 (범종 등 '정시 알림'은 건너뛰어도 된다)
+    this.game.emit('time:hour', { hour: Math.floor(this.hour), day: this.day, set: true });
   }
   /** 시간을 앞으로 건너뛴다 (잠·기다리기). 지나간 정시마다 이벤트·날씨 판정 */
   skip(hours) {
@@ -153,12 +155,14 @@ class TimeSystem {
   }
   /** 다음에 오는 h 시까지 건너뛴다 (예: 아침 6시까지 자기) */
   skipTo(h) {
+    if (!Number.isFinite(h)) return;
     let d = (((h - this.hour) % 24) + 24) % 24;
     if (d < 0.01) d = 24;
     this.skip(d);
   }
   setWeather(w, opts = {}) {
     if (!WEATHERS.includes(w)) return false;
+    opts = opts || {};
     if (opts.lock != null) this.weatherLocked = !!opts.lock;
     const prev = this.weather;
     this.weather = w;
@@ -215,7 +219,7 @@ class TimeSystem {
     this._wclock = 2 + rand.int(0, 2);
     this._snapFx();
     if (prev !== this.weather) this.game.emit('weather:change', { weather: this.weather, prev });
-    this.game.emit('time:hour', { hour: Math.floor(this.hour), day: this.day });
+    this.game.emit('time:hour', { hour: Math.floor(this.hour), day: this.day, set: true });
   }
 
   // ------------------------------------------------------------ 시스템 훅
@@ -245,11 +249,12 @@ class TimeSystem {
   }
 
   _advance(dh) {
-    if (!(dh > 0)) return;
+    if (!(dh > 0) || !Number.isFinite(dh)) return; // Infinity 면 아래 날짜 계산이 끝나지 않는다
     this.hour += dh;
-    while (this.hour >= 24) {
-      this.hour -= 24;
-      this.day++;
+    if (this.hour >= 24) {
+      const days = Math.floor(this.hour / 24);
+      this.hour -= days * 24;
+      this.day += days;
     }
     const abs = this._abs();
     const from = Math.floor(this._lastAbs), to = Math.floor(abs);
@@ -468,7 +473,10 @@ class TimeSystem {
     const overcast = light * (0.05 * fx.cloud + 0.1 * fx.rain + 0.08 * fx.storm + 0.03 * fx.fog);
     const darkA = clamp(night * 0.66 + overcast + night * fx.rain * 0.06, 0, 0.8);
     this.darkness = darkA;
-    if (darkA < 0.015) return;
+    if (darkA < 0.015) {
+      this._lightBuf.length = 0; // 낮에는 지난밤 빛 목록을 남기지 않는다
+      return;
+    }
     const lights = this._collectLights(game, night, b);
     const d = this._darkCtx;
     if (d) {
@@ -485,18 +493,25 @@ class TimeSystem {
       d.fillStyle = PAL.night;
       d.globalAlpha = darkA;
       d.fillRect(0, 0, cw, ch);
-      // 빛 구멍
-      d.globalAlpha = 1;
+      // 빛 구멍: 미리 그린 방사형 스프라이트를 globalAlpha 로 찍는다 (매 프레임 그라디언트 생성 없음)
       d.globalCompositeOperation = 'destination-out';
+      const hole = this._holeSprite();
       for (const L of lights) {
         const x = L.sx * S, y = L.sy * S, r = L.sr * S;
-        const g = d.createRadialGradient(x, y, 0, x, y, r);
-        g.addColorStop(0, `rgba(0,0,0,${L.k})`);
-        g.addColorStop(0.45, `rgba(0,0,0,${L.k * 0.65})`);
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        d.fillStyle = g;
-        d.fillRect(x - r, y - r, r * 2, r * 2);
+        if (hole) {
+          d.globalAlpha = L.k;
+          d.drawImage(hole, x - r, y - r, r * 2, r * 2);
+        } else {
+          d.globalAlpha = 1;
+          const g = d.createRadialGradient(x, y, 0, x, y, r);
+          g.addColorStop(0, `rgba(0,0,0,${L.k})`);
+          g.addColorStop(0.45, `rgba(0,0,0,${L.k * 0.65})`);
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          d.fillStyle = g;
+          d.fillRect(x - r, y - r, r * 2, r * 2);
+        }
       }
+      d.globalAlpha = 1;
       d.globalCompositeOperation = 'source-over';
       ctx.drawImage(this._dark, 0, 0, W, H);
     }
@@ -505,13 +520,20 @@ class TimeSystem {
       ctx.globalCompositeOperation = 'lighter';
       for (const L of lights) {
         if (!(L.warm > 0)) continue;
-        const r = L.sr * 0.8;
-        const g = ctx.createRadialGradient(L.sx, L.sy, 0, L.sx, L.sy, r);
-        g.addColorStop(0, colorA(L.color, 0.1 * L.warm * night));
-        g.addColorStop(1, colorA(L.color, 0));
-        ctx.fillStyle = g;
-        ctx.fillRect(L.sx - r, L.sy - r, r * 2, r * 2);
+        const r = L.sr * 0.8, a = 0.1 * L.warm * night;
+        const spr = this._glowSprite(L.color);
+        if (spr) {
+          ctx.globalAlpha = clamp(a, 0, 1);
+          ctx.drawImage(spr, L.sx - r, L.sy - r, r * 2, r * 2);
+        } else {
+          const g = ctx.createRadialGradient(L.sx, L.sy, 0, L.sx, L.sy, r);
+          g.addColorStop(0, colorA(L.color, a));
+          g.addColorStop(1, colorA(L.color, 0));
+          ctx.fillStyle = g;
+          ctx.fillRect(L.sx - r, L.sy - r, r * 2, r * 2);
+        }
       }
+      ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
     }
     // 비네트
@@ -531,16 +553,59 @@ class TimeSystem {
     }
   }
 
+  /** 빛 구멍 스프라이트(검정, 가운데 불투명 → 가장자리 투명). 한 번만 만든다 */
+  _holeSprite() {
+    if (this._hole !== undefined) return this._hole;
+    const c = makeCanvas(128, 128);
+    if (c) {
+      const x = c.getContext('2d');
+      const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+      g.addColorStop(0, 'rgba(0,0,0,1)');
+      g.addColorStop(0.45, 'rgba(0,0,0,0.65)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g;
+      x.fillRect(0, 0, 128, 128);
+    }
+    return (this._hole = c);
+  }
+  /** 따스한 빛 스프라이트 (색마다 하나, 최대 16색) */
+  _glowSprite(color) {
+    const key = typeof color === 'string' ? color : '#ffc27a';
+    const m = this._glow || (this._glow = new Map());
+    if (m.has(key)) return m.get(key);
+    if (m.size >= 16) return m.values().next().value || null;
+    const c = makeCanvas(64, 64);
+    if (c) {
+      const x = c.getContext('2d');
+      const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, colorA(key, 1));
+      g.addColorStop(1, colorA(key, 0));
+      x.fillStyle = g;
+      x.fillRect(0, 0, 64, 64);
+    }
+    m.set(key, c);
+    return c;
+  }
+
   /** 화면 안의 빛: 플레이어 등불, 집 창문, game.lights */
   _collectLights(game, night, b) {
     const out = this._lightBuf;
+    const pool = this._lightPool || (this._lightPool = []);
     out.length = 0;
     const cam = game.camera, z = cam.zoom, W = cam.viewW, H = cam.viewH, t = game.realTime;
     const push = (x, y, r, k, color, warm) => {
       if (out.length >= 64 || !(r > 0) || !(k > 0)) return;
       const s = cam.worldToScreen(x, y), sr = r * z;
+      if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) return;
       if (s.x + sr < 0 || s.y + sr < 0 || s.x - sr > W || s.y - sr > H) return;
-      out.push({ sx: s.x, sy: s.y, sr, k: clamp(k, 0, 1), color, warm });
+      const L = pool[out.length] || (pool[out.length] = {});
+      L.sx = s.x;
+      L.sy = s.y;
+      L.sr = sr;
+      L.k = clamp(k, 0, 1);
+      L.color = color;
+      L.warm = warm;
+      out.push(L);
     };
     const p = game.player;
     if (p && this.playerLantern && night > 0.25 && p.state !== 'dead') {
@@ -556,9 +621,12 @@ class TimeSystem {
     }
     const frac = litFraction(this.hour);
     if (night > 0.3 && frac > 0) {
+      const litH = this._litH || (this._litH = new WeakMap()); // 월드 데이터에 속성을 덧붙이지 않는다
       for (const bd of this._buildingsIn(game, b)) {
-        const h = bd._litH ?? (bd._litH = strHash(bd.id ?? `${bd.x},${bd.y}`));
-        if (h >= frac || NO_WINDOW.has(bd.kind)) continue;
+        if (NO_WINDOW.has(bd.kind) || bd.roof === 'none') continue;
+        let h = litH.get(bd);
+        if (h === undefined) litH.set(bd, (h = strHash(bd.id ?? `${bd.x},${bd.y}`)));
+        if (h >= frac) continue;
         const cx = bd.x, cy = bd.y;
         const dx = bd.door?.x ?? cx, dy = bd.door?.y ?? cy;
         const lx = cx + (dx - cx) * 0.55, ly = cy + (dy - cy) * 0.55;
@@ -572,8 +640,10 @@ class TimeSystem {
 
   /** 화면 안 건물 (64m 격자 캐시) */
   _buildingsIn(game, b) {
+    const res = this._bldBuf || (this._bldBuf = []);
+    res.length = 0;
     const list = game.world?.buildings;
-    if (!Array.isArray(list) || !list.length || !b) return [];
+    if (!Array.isArray(list) || !list.length || !b) return res;
     if (this._gridRef !== list || this._gridLen !== list.length) {
       this._gridRef = list;
       this._gridLen = list.length;
@@ -586,7 +656,6 @@ class TimeSystem {
         a.push(bd);
       }
     }
-    const res = [];
     const pad = 12;
     const x0 = Math.floor((b.x0 - pad) / 64), x1 = Math.floor((b.x1 + pad) / 64);
     const y0 = Math.floor((b.y0 - pad) / 64), y1 = Math.floor((b.y1 + pad) / 64);

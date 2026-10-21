@@ -85,6 +85,8 @@ export function createTouch(ui, game) {
       return;
     }
     game.input.setVirtual(action, on);
+    // 코어 mouseDown(0) 은 가상 'fire' 를 보지만 mousePressed(0) 은 안 본다: 한 발씩 쏘는 무기를 위해 '눌림' 도 넣어 준다
+    if (action === 'fire' && on && game.input.mouse?.pressed) game.input.mouse.pressed[0] = true;
   }
 
   for (const d of BUTTONS) {

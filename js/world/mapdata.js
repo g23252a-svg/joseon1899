@@ -226,7 +226,7 @@ export const MAP = {
     },
   ],
   settlements: [
-    { id: 'hanseong', name: '한성', kind: 'city', x: 2840, y: 760, r: 470, houses: 380, style: 'mixed', seed: 11 },
+    { id: 'hanseong', name: '한성', kind: 'city', x: 2840, y: 760, r: 470, houses: 760, style: 'mixed', seed: 11 },
     { id: 'jeongdong', name: '정동', kind: 'town', x: 2440, y: 860, r: 60, houses: 6, style: 'western', seed: 12 },
     { id: 'seodaemun_out', name: '서대문 밖', kind: 'village', x: 2230, y: 740, r: 70, houses: 14, style: 'choga', seed: 13 },
     { id: 'dongdaemun_out', name: '동대문 밖', kind: 'village', x: 3400, y: 800, r: 70, houses: 14, style: 'choga', seed: 14 },
@@ -237,7 +237,7 @@ export const MAP = {
     { id: 'solgogae', name: '솔고개 주막거리', kind: 'village', x: 1360, y: 1860, r: 45, houses: 7, style: 'choga', seed: 19 },
     { id: 'sosa', name: '소사', kind: 'village', x: 1110, y: 1850, r: 70, houses: 14, style: 'choga', seed: 20 },
     { id: 'bupyeong', name: '부평', kind: 'village', x: 760, y: 1470, r: 80, houses: 18, style: 'mixed', seed: 21 },
-    { id: 'jemulpo', name: '제물포', kind: 'port', x: 560, y: 1660, r: 140, houses: 50, style: 'mixed', seed: 22 },
+    { id: 'jemulpo', name: '제물포', kind: 'port', x: 560, y: 1660, r: 140, houses: 70, style: 'mixed', seed: 22 },
     { id: 'jemulpo_concession', name: '제물포 조계', kind: 'town', x: 500, y: 1630, r: 60, houses: 10, style: 'western', seed: 23 },
     { id: 'haengju', name: '행주', kind: 'village', x: 1160, y: 830, r: 60, houses: 12, style: 'choga', seed: 24 },
     { id: 'morae', name: '모래내 주막거리', kind: 'village', x: 1890, y: 850, r: 45, houses: 7, style: 'choga', seed: 25 },

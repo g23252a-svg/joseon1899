@@ -47,18 +47,20 @@ export function createTitle(ui, game) {
   let t = 0;
   let anchor = null; // 카메라 흐름 기준점
   let busy = false;
-
-  function hasSave() {
-    const s = game.sys.save;
-    if (typeof s?.load !== 'function') return false;
-    return !!safe(() => s.hasSave?.('auto') ?? s.hasSave?.(), false);
-  }
+  let contShown = false;
 
   function refresh() {
-    const save = hasSave();
-    setHidden(bCont, !(ui.played || save));
+    const save = ui.hasSave();
+    contShown = !!(ui.played || save);
+    setHidden(bCont, !contShown);
     setText(bCont._label, ui.played ? '하던 길 이어 가기' : '이어 하기');
-    setText(note, '');
+    // 남긴 기록 요약 (save.info 가 있으면)
+    let txt = '';
+    if (!ui.played && save) {
+      const inf = safe(() => game.sys.save.info?.('auto'), null);
+      if (inf) txt = ['남긴 기록', inf.day ? `${inf.day}일째` : '', inf.region || ''].filter(Boolean).join(' · ');
+    }
+    setText(note, txt);
   }
 
   function start() {
@@ -68,11 +70,21 @@ export function createTitle(ui, game) {
 
   function onNew() {
     if (busy) return;
-    if (!ui.played) return start();
+    if (!ui.played) {
+      // 남긴 기록이 있으면 묻는다: 새로 시작하면 다음 자동 저장이 그 기록을 덮어쓴다
+      if (!ui.hasSave()) return start();
+      busy = true;
+      ui.choice('남긴 기록이 있습니다. 새로 시작하면 다음 자동 저장 때 그 기록이 지워집니다. 새로 시작하시겠습니까?', ['새로 시작', '그만두기']).then((i) => {
+        busy = false;
+        if (i === 0 && visible) start();
+        else focusFirst();
+      });
+      return;
+    }
     busy = true;
     ui.choice('지금까지 걸어온 길은 남지 않습니다. 처음부터 다시 시작하시겠습니까?', ['처음부터 다시', '그만두기']).then((i) => {
       busy = false;
-      if (i !== 0) return;
+      if (i !== 0) return focusFirst();
       ssSet('autostart', '1');
       try {
         window.location.reload();
@@ -83,15 +95,25 @@ export function createTitle(ui, game) {
   }
 
   function onContinue() {
+    if (busy) return;
     if (ui.played) {
       ui.hideTitle();
       game.state = 'play';
       return;
     }
     ui.hideTitle();
+    // 불러온 뒤에 시작한다: 각 시스템 onStart 가 save.loaded 를 보고 새 게임 준비(첫 미션 등)를 건너뛸 수 있게
+    ui.loadGame();
     game.beginPlay();
-    const ok = safe(() => game.sys.save?.load?.(), false);
-    ui.toast(ok ? '남긴 기록을 불러왔습니다' : '기록을 불러오지 못해 처음부터 시작합니다', ok ? 'good' : 'warn');
+  }
+
+  function focusFirst() {
+    if (!visible) return;
+    try {
+      (contShown ? bCont : bNew).focus({ preventScroll: true });
+    } catch (err) {
+      /* 무시 */
+    }
   }
 
   return {
@@ -109,11 +131,7 @@ export function createTitle(ui, game) {
       anchor = { x: cam.x, y: cam.y };
       t = 0;
       if (cam.baseZoom) cam.zoom = cam.baseZoom * 0.72;
-      try {
-        bNew.focus({ preventScroll: true });
-      } catch (err) {
-        /* 무시 */
-      }
+      focusFirst(); // 남긴 기록이 있으면 '이어 하기', 없으면 '새로 시작'
     },
     hide() {
       if (!visible) return;
@@ -128,6 +146,7 @@ export function createTitle(ui, game) {
       }
     },
     startNew: start,
+    focus: focusFirst,
     frame(dt) {
       if (leaveT >= 0) {
         leaveT -= dt;

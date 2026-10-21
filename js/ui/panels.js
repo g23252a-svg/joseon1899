@@ -31,7 +31,7 @@ export function cycleFocus(container, back = false) {
   }
 }
 
-export function createPanels(ui, game) {
+export function createPanels(ui, game, hooks = {}) {
   const tabsNav = h('div', { class: 'jx-tabs', role: 'tablist', 'aria-label': '메뉴' });
   const titleText = h('span');
   const titleHanja = h('small');
@@ -124,10 +124,8 @@ export function createPanels(ui, game) {
     else ctx.setTitle(v.title || '', v.hanja || '');
     setHidden(moneyEl, !v.money);
     setHidden(wrap, false);
-    if (!was) {
-      game.pause('ui');
-      game.sfx?.('ui_open');
-    } else game.sfx?.('ui_click');
+    // 여닫는 소리는 audio 가 'ui:panel' 이벤트를 듣고 낸다
+    if (!was) game.pause('ui');
     try {
       v.mount?.(arg);
     } catch (err) {
@@ -135,9 +133,12 @@ export function createPanels(ui, game) {
     }
     queued = false;
     game.emit('ui:panel', { name, open: true });
-    if (!was) {
+    // 처음 열 때, 또는 탭에 포커스가 있던 채로 바꿀 때 포커스를 새 탭으로
+    const ae = document.activeElement;
+    const onTab = !!ae && tabBtns.includes(ae);
+    if (!was || onTab || !panel.contains(ae)) {
       try {
-        (tab ? tabBtns[TABS.indexOf(tab)] : closeBtn).focus({ preventScroll: true });
+        (tab ? tabBtns[TABS.indexOf(tab)] : v.focusEl || closeBtn).focus({ preventScroll: true });
       } catch (err) {
         /* 무시 */
       }
@@ -157,11 +158,11 @@ export function createPanels(ui, game) {
     setHidden(wrap, true);
     body.textContent = '';
     game.resume('ui');
-    game.sfx?.('ui_close');
     game.emit('ui:panel', { name, open: false });
     try {
       document.activeElement?.blur?.();
       game.canvas?.focus?.({ preventScroll: true });
+      hooks.onClose?.(name);
     } catch (err) {
       /* 무시 */
     }
@@ -220,17 +221,13 @@ function createPauseView(c) {
 
   const bResume = btn('이어 하기', '續', () => c.close(), true);
   const bSave = btn('기록 남기기', '記', () => {
-    const s = game.sys.save;
-    const ok = safe(() => s?.save?.(), false);
+    const ok = ui.saveGame();
     setText(status, ok ? '기록을 남겼습니다.' : '기록을 남기지 못했습니다.');
-    c.toast(ok ? '기록을 남겼습니다' : '기록을 남기지 못했습니다', ok ? 'good' : 'bad');
     refresh();
   });
   const bLoad = btn('기록 불러오기', '讀', () => {
-    const s = game.sys.save;
     c.close();
-    const ok = safe(() => s?.load?.(), false);
-    c.toast(ok ? '남긴 기록을 불러왔습니다' : '기록을 불러오지 못했습니다', ok ? 'good' : 'bad');
+    ui.loadGame();
   });
   const bHelp = btn('조작법', '法', () => c.open('help'));
   const bTitle = btn('처음 화면으로', '初', () => {
@@ -275,8 +272,12 @@ function createPauseView(c) {
   function refresh() {
     const s = game.sys.save;
     bSave.disabled = typeof s?.save !== 'function';
-    bLoad.disabled = !(typeof s?.load === 'function' && safe(() => s.hasSave?.('auto') ?? s.hasSave?.() ?? true, false));
+    bLoad.disabled = !ui.hasSave();
     if (!s) setText(status, '저장 기능이 아직 마련되지 않았습니다.');
+    else if (s.lastSaveAt && !status.textContent) {
+      const d = new Date(s.lastSaveAt);
+      if (!isNaN(d)) setText(status, `마지막 기록: ${d.getHours()}시 ${String(d.getMinutes()).padStart(2, '0')}분`);
+    }
     const v = ui.getVolume();
     vol.value = String(Math.round(v * 100));
     setText(volOut, `${Math.round(v * 100)}`);
@@ -286,6 +287,7 @@ function createPauseView(c) {
     el,
     title: '쉬어가기',
     hanja: '休',
+    focusEl: bResume,
     mount() {
       setText(status, '');
       refresh();
@@ -337,7 +339,8 @@ const HELP = [
       ['일지', ['J'], '메뉴 → 일지'],
       ['쉬어가기 · 메뉴 닫기', ['Esc', 'P'], '메뉴'],
       ['메뉴 안에서 옮겨 다니기', ['Tab', 'Shift+Tab'], '—'],
-      ['가까이 · 멀리 보기', ['휠', '+', '−'], '—'],
+      ['가까이 · 멀리 보기', ['휠', '+', '−'], '두 손가락 (지도)'],
+      ['소리 켬 · 끔', ['N'], '메뉴 → 소리 크기'],
       ['디버그 정보', ['`'], '—'],
     ],
   },

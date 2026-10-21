@@ -134,7 +134,7 @@ export function createDialogue(ui, game) {
     choiceBtns = opts.map((o, i) => {
       const b = h(
         'button',
-        { class: 'jx-choice', type: 'button', onclick: () => pick(i), onpointerenter: () => highlight(i) },
+        { class: 'jx-choice', type: 'button', onclick: () => pick(i), onpointerenter: () => highlight(i, true), onfocus: () => highlight(i) },
         h('span', { class: 'jx-key', text: String(i + 1) }),
         h('span', { text: o })
       );
@@ -144,17 +144,20 @@ export function createDialogue(ui, game) {
     setHidden(list, false);
     setClass(box, 'jx-choosing', true);
     setHidden(hint, true);
-    highlight(0);
-    try {
-      choiceBtns[0]?.focus?.({ preventScroll: true });
-    } catch (err) {
-      /* 무시 */
-    }
+    highlight(0, true);
   }
 
-  function highlight(i) {
+  /** 고른 줄 표시. 포커스도 함께 옮겨서 표시가 하나만 보이게 한다 */
+  function highlight(i, moveFocus = false) {
     hi = Math.max(0, Math.min(choiceBtns.length - 1, i));
     choiceBtns.forEach((b, j) => setClass(b, 'jx-hi', j === hi));
+    if (moveFocus && choiceBtns[hi] && document.activeElement !== choiceBtns[hi]) {
+      try {
+        choiceBtns[hi].focus({ preventScroll: true });
+      } catch (err) {
+        /* 무시 */
+      }
+    }
   }
 
   function pick(i) {
@@ -183,8 +186,8 @@ export function createDialogue(ui, game) {
         }
       }
       if (cur?.type === 'choice') {
-        if (inp.pressed('up')) highlight(hi - 1);
-        if (inp.pressed('down')) highlight(hi + 1);
+        if (inp.pressed('up')) highlight(hi - 1, true);
+        if (inp.pressed('down')) highlight(hi + 1, true);
         if (inp.pressed('interact') || inp.pressed('brake') || inp.pressed('confirm')) pick(hi);
       }
     }

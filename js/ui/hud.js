@@ -5,7 +5,7 @@ import { FONT, PAL } from '../engine/palette.js';
 import { clamp, mixHex, rgba, sijin, TAU } from '../engine/util.js';
 import { clamp01, dpr, formatMoney, h, safe, setAttr, setClass, setHidden, setStyle, setText, viewW } from './dom.js';
 import { drawMarker, drawPlayerArrow, drawVehicleMark } from './icons.js';
-import { collectMarkers, drawImageClipped, drawLines, getMapImage } from './maputil.js';
+import { collectMarkers, drawImageClipped, drawLines, getLocalMap, getMapImage, warmMapImage } from './maputil.js';
 
 const HEALTH = mixHex(PAL.seal, PAL.blood, 0.35);
 const STAMINA = mixHex(PAL.seaDeep, PAL.night, 0.45);
@@ -124,7 +124,7 @@ export function createHud(ui, game) {
     const p = game.player;
     if (st) {
       const g = st[key];
-      if (g && typeof g === 'object' && typeof g.value === 'number') return { v: g.value, max: g.max || 100, core: typeof g.core === 'number' ? g.core : 100 };
+      if (g && typeof g === 'object' && typeof g.value === 'number') return { v: g.value, max: g.max || 100, core: Number.isFinite(g.core) ? g.core : 100 };
       if (typeof g === 'number') return { v: g, max: 100, core: 100 };
     }
     if (!p) return null;
@@ -212,11 +212,16 @@ export function createHud(ui, game) {
   }
 
   // ---------------------------------------------------------------- 돈·수배·의
+  let lastMoney = NaN;
   function updatePurse() {
     const inv = game.sys.inventory;
     const hasMoney = inv && typeof inv.money === 'number';
     setHidden(money, !hasMoney);
-    if (hasMoney) setText(moneyText, formatMoney(game, inv.money));
+    // 돈 글자는 값이 바뀔 때만 만든다 (formatMoney·toLocaleString 을 매 프레임 부르지 않게)
+    if (hasMoney && inv.money !== lastMoney) {
+      lastMoney = inv.money;
+      setText(moneyText, formatMoney(game, inv.money));
+    }
 
     const w = game.sys.wanted;
     const lvl = w ? clamp(Math.round(Number(w.level) || 0), 0, 4) : 0;
@@ -257,7 +262,9 @@ export function createHud(ui, game) {
     if (!ctx || !p) return;
     const focus = p.vehicle || p;
     const fx = focus.x, fy = focus.y;
-    const sp = Math.hypot(focus.vx || 0, focus.vy || 0);
+    // 좌표가 깨졌으면(NaN) 그리지 않는다: 가까운 곳 그림을 매번 통째로 다시 만들게 되므로
+    if (!Number.isFinite(fx) || !Number.isFinite(fy)) return;
+    const sp = Math.hypot(focus.vx || 0, focus.vy || 0) || 0;
     const target = 80 + clamp(sp, 0, 26) * 7.5;
     miniR += (target - miniR) * Math.min(1, dt * 1.2);
     const c = S / 2, rad = S / 2 - 6;
@@ -272,11 +279,13 @@ export function createHud(ui, game) {
     ctx.clip();
     ctx.fillStyle = PAL.paper;
     ctx.fillRect(0, 0, S, S);
-    const img = getMapImage(game);
+    // 전체 지도 그림이 충분히 촘촘하면 그것을, 아니면 가까운 곳만 따로 그린 그림을 쓴다
+    const wm = game.world?.mapCanvas ? getMapImage(game) : null;
+    const img = wm && wm.scale * miniR * 2 >= S * 0.8 ? wm : getLocalMap(game, fx, fy, miniR);
     if (img) {
-      const s = img.scale;
+      const s = img.scale, ox = img.x0 || 0, oy = img.y0 || 0;
       ctx.imageSmoothingEnabled = true;
-      drawImageClipped(ctx, img.canvas, (fx - miniR) * s, (fy - miniR) * s, 2 * miniR * s, 2 * miniR * s, c - rad, c - rad, 2 * rad, 2 * rad);
+      drawImageClipped(ctx, img.canvas, (fx - miniR - ox) * s, (fy - miniR - oy) * s, 2 * miniR * s, 2 * miniR * s, c - rad, c - rad, 2 * rad, 2 * rad);
     }
     // 종이에 스민 듯 옅게
     ctx.fillStyle = rgba(PAL.paper, 0.14);
@@ -380,6 +389,7 @@ export function createHud(ui, game) {
     const txt = safe(() => game.sys.missions?.objectiveText?.(), '') || '';
     if (setText(objText, typeof txt === 'string' ? txt : String(txt))) {
       setHidden(obj, !txt);
+      setAttr(obj, 'title', txt || null);
       if (txt) {
         obj.classList.remove('jx-flash');
         void obj.offsetWidth; // 애니메이션 다시 시작
@@ -447,6 +457,7 @@ export function createHud(ui, game) {
   function updateVehicle() {
     const p = game.player;
     const v = p?.vehicle;
+    setClass(el, 'jx-riding', !!v);
     if (!v) {
       if (vehSig !== '') {
         vehSig = '';
@@ -606,6 +617,8 @@ export function createHud(ui, game) {
       dbgAcc = 0;
       updateDebug();
     }
+    // 큰 지도 그림을 틈틈이 미리 만들어 둔다 (world.mapCanvas 가 없을 때만)
+    if (!game.paused) warmMapImage(game, 1.2);
   }
 
   return {

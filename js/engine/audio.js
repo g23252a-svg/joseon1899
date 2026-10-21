@@ -646,7 +646,8 @@ class AudioSystem {
   unlock() {
     try {
       if (!this.ctx && !this._build()) return false;
-      if (this.ctx.state === 'suspended' && !this._hidden) this.ctx.resume?.()?.catch?.(() => {});
+      const st = this.ctx.state; // iOS 는 'interrupted' 도 있다
+      if (st !== 'running' && st !== 'closed' && !this._hidden) this.ctx.resume?.()?.catch?.(() => {});
       return true;
     } catch (err) {
       console.warn('[audio] 시작하지 못함:', err?.message);
@@ -658,14 +659,18 @@ class AudioSystem {
   play(name, opts = {}) {
     const c = this.ctx;
     if (!c || this._muted || c.state !== 'running') return false;
+    if (!opts || typeof opts !== 'object') opts = {};
     const key = SFX[name] ? name : ALIAS[name];
     const fn = key && SFX[key];
     if (!fn) return false;
     const now = c.currentTime;
-    if (opts.at == null && now - (this._last[key] ?? -9) < (THROTTLE[key] ?? 0.025)) return false;
+    const at = Number.isFinite(opts.at) ? opts.at : null;
+    if (at == null && now - (this._last[key] ?? -9) < (THROTTLE[key] ?? 0.025)) return false;
     this._pruneVoices(now);
     if (this._voices.length >= MAX_VOICES && !opts.important) return false;
-    let vol = opts.volume ?? 1, pan = 0, lp = 0, wet = WET[key] ?? 0.08;
+    // 잘못된 값(NaN·0·음수)이 AudioParam 에 들어가면 예외가 나므로 먼저 거른다
+    const v0 = Number(opts.volume ?? 1);
+    let vol = Number.isFinite(v0) ? clamp(v0, 0, 4) : 1, pan = 0, lp = 0, wet = WET[key] ?? 0.08;
     if (Number.isFinite(opts.x) && Number.isFinite(opts.y)) {
       const L = this._listener();
       const dx = opts.x - L.x, dy = opts.y - L.y, d = Math.hypot(dx, dy);
@@ -679,8 +684,10 @@ class AudioSystem {
     }
     if (vol < 0.004) return false;
     this._last[key] = now;
-    const pitch = (opts.pitch ?? 1) * (this._muffled ? 0.86 : 1);
-    const t = opts.at ?? now + 0.004 + (opts.delay ?? 0);
+    const p0 = Number(opts.pitch ?? 1);
+    const pitch = (Number.isFinite(p0) && p0 > 0 ? clamp(p0, 0.05, 8) : 1) * (this._muffled ? 0.86 : 1);
+    const delay = Number(opts.delay ?? 0);
+    const t = at ?? now + 0.004 + (Number.isFinite(delay) ? Math.max(0, delay) : 0);
     try {
       const out = c.createGain();
       out.gain.value = vol;
@@ -798,7 +805,7 @@ class AudioSystem {
     this._scheduleMusic();
     if (!paused && g.state === 'play') {
       this._footsteps();
-      this._vehicleSounds();
+      this._vehicleSounds(rdt);
     } else this._stepK = null;
   }
 
@@ -814,6 +821,23 @@ class AudioSystem {
       c = new AC();
     }
     this.ctx = c;
+    try {
+      this._buildGraph(c);
+    } catch (err) {
+      // 그래프를 반쯤 만들다 실패하면 ctx 를 버린다 (반쪽 그래프로 _tick 이 매 틱 터지지 않게)
+      this.ctx = null;
+      this._ambL = null;
+      try {
+        c.close?.()?.catch?.(() => {});
+      } catch {
+        /* 무시 */
+      }
+      throw err;
+    }
+    return true;
+  }
+
+  _buildGraph(c) {
     const comp = c.createDynamicsCompressor();
     comp.threshold.value = -16;
     comp.knee.value = 12;
@@ -860,7 +884,6 @@ class AudioSystem {
     s.buffer = c.createBuffer(1, 1, c.sampleRate);
     s.connect(c.destination);
     s.start(0);
-    return true;
   }
 
   _noiseBuf(kind, sec) {
@@ -1054,7 +1077,8 @@ class AudioSystem {
 
   /** 가야금 뜯는 소리. orn: vib(농현)·shake(떠는 소리)·bend(꺾는 소리)·slide(추성)·fall(퇴성) */
   pluck(dest, t, f, o = {}) {
-    const c = this.ctx, dur = o.dur ?? 1.6, vol = o.vol ?? 0.3, bright = o.bright ?? 1;
+    const c = this.ctx, dur = Math.max(0.25, o.dur ?? 1.6), vol = o.vol ?? 0.3, bright = o.bright ?? 1;
+    if (!(vol > 0) || !(f > 0)) return; // 0 으로 가는 지수 램프는 예외
     const o1 = c.createOscillator(), o2 = c.createOscillator();
     o1.type = 'sawtooth';
     o2.type = 'sine';
@@ -1066,7 +1090,7 @@ class AudioSystem {
     const g = c.createGain();
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(vol, t + 0.004);
-    g.gain.exponentialRampToValueAtTime(vol * 0.3, t + 0.2);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0001, vol * 0.3), t + 0.2);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     const g2 = c.createGain();
     g2.gain.value = 0.5;
@@ -1349,10 +1373,11 @@ class AudioSystem {
       if (id === 'tram') this.play('tram_bell', { ...pos, volume: 0.6 });
       else this.play('steam', pos);
     });
-    on('wanted:change', (e) => {
-      const lv = e.level ?? 0;
+    // 상태 추적은 ctx 가 아직 없어도 해 둔다 (소리를 늦게 켜도 어긋나지 않게)
+    g.on('wanted:change', (e) => {
+      const lv = e?.level ?? 0;
       if (lv > this._lastWanted) {
-        this.play('wanted');
+        if (this.ctx) this.play('wanted');
         this._combat();
       }
       this._lastWanted = lv;
@@ -1371,14 +1396,25 @@ class AudioSystem {
     on('mission:complete', () => endMission('mission_complete'));
     on('mission:fail', () => endMission('mission_fail'));
     on('ui:panel', (e) => this.play(e.open ? 'ui_open' : 'ui_close'));
-    on('player:dead', () => {
+    g.on('player:dead', () => {
+      this._hold = true;
+      if (!this.ctx) return;
       this.play('death', { important: true });
       this.play('mission_fail', { delay: 0.8, important: true });
-      this._hold = true;
     });
-    on('player:respawn', () => (this._hold = false));
-    on('game:start', () => (this._hold = false));
-    on('time:hour', (e) => (e.hour === 6 || e.hour === 18) && this.play('temple_bell', { volume: 0.55 }));
+    g.on('player:respawn', () => (this._hold = false));
+    g.on('game:start', () => {
+      this._hold = false;
+      // 타이틀에서 손으로 고른 'title' 곡이 놀이 내내 남지 않게
+      if (this.musicMode === 'manual' && this._manualTrack === 'title') this.music('auto');
+    });
+    g.on('save:load', () => {
+      this._hold = false;
+      this._combatUntil = -1;
+      this._lastWanted = this.game.sys.wanted?.level ?? 0;
+    });
+    // set: setHour·불러오기로 시각을 '맞춘' 것 — 종을 치지 않는다
+    on('time:hour', (e) => !e.set && (e.hour === 6 || e.hour === 18) && this.play('temple_bell', { volume: 0.55 }));
   }
 
   _weaponDef(w) {
@@ -1621,7 +1657,7 @@ class AudioSystem {
     this.play('step', { volume: vol, surface: this._surface(p.x, p.y), pitch: rr(0.9, 1.1) });
   }
 
-  _vehicleSounds() {
+  _vehicleSounds(rdt = 1 / 60) {
     const p = this.game.player;
     const v = p?.vehicle;
     const now = this.ctx.currentTime;
@@ -1667,7 +1703,7 @@ class AudioSystem {
       }
     }
     if (this.auto.oar && v.vtype === 'rowboat' && v.driver === p && sp > 0.3) {
-      if ((this._oarT -= 1 / 60) <= 0) {
+      if ((this._oarT -= rdt) <= 0) {
         this._oarT = clamp(2.2 - sp * 0.4, 1, 2);
         this.play('oar', { volume: 0.45 });
       }
@@ -1690,6 +1726,8 @@ class AudioSystem {
       this._setTrack(this._manualTrack);
       return;
     }
+    // 죽음 뒤 침묵: 부활 이벤트가 없어도(수배 시스템 없음 등) 다시 살아 있으면 푼다
+    if (this._hold && this.game.player?.state !== 'dead') this._hold = false;
     if (this._hold) {
       this._setTrack(null);
       return;

@@ -386,7 +386,7 @@ export class Structures {
       b.h = y1 - y0;
       if (!this.canPlace(b, city ? 1.1 : 1.6)) return false;
       this.addBuilding(b);
-      this.paintYard(b, city ? 2 : 3.5, city ? 1 : 1.8);
+      this.paintYard(b, city ? 2 : 3.2, city ? 0.8 : 1);
       placed++;
       return true;
     };
@@ -950,23 +950,32 @@ export class RoofRenderer {
     this.perFrame = 8;
     this._vis = [];
   }
+  /** 지붕 캐시: 건물 각도까지 돌려서 그려 둔다 (그릴 때 회전·save/restore 가 필요 없다) */
   _entry(b, tier) {
-    const lb = b._lb;
+    const lb = b._lb, c = Math.cos(b.angle || 0), sn = Math.sin(b.angle || 0);
+    let rx0 = Infinity, ry0 = Infinity, rx1 = -Infinity, ry1 = -Infinity;
+    for (const [lx, ly] of [[lb.x0, lb.y0], [lb.x1, lb.y0], [lb.x1, lb.y1], [lb.x0, lb.y1]]) {
+      const x = lx * c - ly * sn, y = lx * sn + ly * c;
+      if (x < rx0) rx0 = x;
+      if (x > rx1) rx1 = x;
+      if (y < ry0) ry0 = y;
+      if (y > ry1) ry1 = y;
+    }
     let t = tier;
-    let w = (lb.x1 - lb.x0) * t, h = (lb.y1 - lb.y0) * t;
+    let w = (rx1 - rx0) * t, h = (ry1 - ry0) * t;
     const mx = Math.max(w, h);
     if (mx > 1400) {
       t *= 1400 / mx;
-      w = (lb.x1 - lb.x0) * t;
-      h = (lb.y1 - lb.y0) * t;
+      w = (rx1 - rx0) * t;
+      h = (ry1 - ry0) * t;
     }
     const cv = makeCanvas(w, h);
     if (!cv) return null;
     const ctx = cv.getContext('2d');
-    ctx.setTransform(t, 0, 0, t, -lb.x0 * t, -lb.y0 * t);
+    ctx.setTransform(t * c, t * sn, -t * sn, t * c, -rx0 * t, -ry0 * t);
     ctx.lineJoin = 'round';
     drawRoof(ctx, b);
-    return { tier, scale: t, canvas: cv, px: Math.ceil(w) * Math.ceil(h) };
+    return { tier, scale: t, canvas: cv, px: Math.ceil(w) * Math.ceil(h), rx0, ry0, rw: rx1 - rx0, rh: ry1 - ry0 };
   }
   draw(ctx, game, view) {
     const st = this.st, cam = game.camera;
@@ -980,11 +989,16 @@ export class RoofRenderer {
     vis.sort((a, b) => a.y - b.y);
     const pl = game.player, tgt = pl?.vehicle || pl;
     let made = 0;
-    const dt = Math.min(0.1, game._rdt || 1 / 60);
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : 0);
+    const t0 = now();
+    const rt = game.realTime || 0;
+    const dt = Math.min(0.1, Math.max(0, rt - (this._lastRT ?? rt)));
+    this._lastRT = rt;
+    ctx.globalAlpha = 1;
     for (const b of vis) {
       let e = this.cache.get(b.id);
       if (!e || e.tier !== tier) {
-        if (made < this.perFrame) {
+        if (made < this.perFrame && (made === 0 || now() - t0 < 2.5)) {
           const ne = this._entry(b, tier);
           made++;
           if (ne) {
@@ -1000,18 +1014,20 @@ export class RoofRenderer {
         this.cache.delete(b.id);
         this.cache.set(b.id, e);
       }
-      const under = tgt && st.underRoof(b, tgt.x, tgt.y, 0.2);
+      const under = tgt && Math.abs(tgt.x - b.x) < b._R + 1 && Math.abs(tgt.y - b.y) < b._R + 1 && st.underRoof(b, tgt.x, tgt.y, 0.2);
       const want = under ? 0.22 : 1;
       b._fade = b._fade == null ? want : b._fade + (want - b._fade) * Math.min(1, dt * 8);
-      ctx.save();
-      ctx.translate(b.x, b.y);
-      if (b.angle) ctx.rotate(b.angle);
-      if (b._fade < 0.995) ctx.globalAlpha = b._fade;
-      if (e) {
-        const lb = b._lb;
-        ctx.drawImage(e.canvas, lb.x0, lb.y0, lb.x1 - lb.x0, lb.y1 - lb.y0);
-      } else drawRoofSimple(ctx, b);
-      ctx.restore();
+      const fade = b._fade < 0.995;
+      if (fade) ctx.globalAlpha = b._fade;
+      if (e) ctx.drawImage(e.canvas, b.x + e.rx0, b.y + e.ry0, e.rw, e.rh);
+      else {
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        if (b.angle) ctx.rotate(b.angle);
+        drawRoofSimple(ctx, b);
+        ctx.restore();
+      }
+      if (fade) ctx.globalAlpha = 1;
     }
     // 화소 예산 초과분 정리 (오래된 것부터)
     if (this.px > this.budgetPx) {
@@ -1118,7 +1134,7 @@ export function drawTreeShadows(ctx, st, ci, cj, x0, y0, x1, y1) {
   ctx.fill();
 }
 
-/** 나무 윗부분(수관) — 캔오피 청크에 일괄로 그린다 */
+/** 나무 윗부분(수관) — 캔오피 청크에 일괄로 그린다. 번지는 물감 덩이 + 점엽(먹 점) + 솔잎 */
 export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
   const list = st.treesInChunk(ci, cj);
   if (!list || !list.length) return 0;
@@ -1126,56 +1142,54 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
   const idx = [];
   for (let k = 0; k < list.length; k++) {
     const n = list[k] * 5;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2] + 0.5;
+    const x = tt[n], y = tt[n + 1], r = tt[n + 2] + 0.6;
     if (x + r < x0 || x - r > x1 || y + r < y0 || y - r > y1) continue;
     idx.push(n);
   }
   if (!idx.length) return 0;
   idx.sort((a, b) => tt[a + 1] - tt[b + 1]);
-  const BROAD = mixHex(PAL.forest, PAL.treeDark, 0.25);
-  const passes = [];
-  // 1) 바탕 번짐: 활엽 덩어리
-  ctx.fillStyle = rgba(BROAD, 0.82);
-  ctx.beginPath();
-  for (const n of idx) {
-    const kind = tt[n + 3];
-    if (kind === 0) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4]);
-    const blobs = kind === 3 ? 6 : kind === 2 ? 3 : 4;
-    for (let b = 0; b < blobs; b++) {
-      const a = rnd() * TAU, d = r * (0.18 + rnd() * 0.25), rr = r * (0.55 + rnd() * 0.2);
+  // 수관 덩이 모양 (물감 번짐): 잎 무리 몇 개
+  const lobes = (n, sc, seedOff) => {
+    const x = tt[n], y = tt[n + 1], r = tt[n + 2], kind = tt[n + 3];
+    srand(tt[n + 4] + seedOff);
+    const cnt = kind === 3 ? 7 : kind === 0 ? 5 : kind === 2 ? 3 : 5;
+    for (let b = 0; b < cnt; b++) {
+      const a = rnd() * TAU, d = r * (0.12 + rnd() * 0.36), rr = r * sc * (0.38 + rnd() * 0.22) * (kind === 0 ? 0.92 : 1);
       const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
       ctx.moveTo(bx + rr, by);
       ctx.arc(bx, by, rr, 0, TAU);
     }
-  }
-  ctx.fill();
-  // 2) 소나무 바탕 (진한 먹빛 녹색)
-  ctx.fillStyle = rgba(PAL.pine, 0.86);
-  ctx.beginPath();
-  for (const n of idx) {
-    if (tt[n + 3] !== 0) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 7);
-    for (let b = 0; b < 4; b++) {
-      const a = rnd() * TAU, d = r * (0.15 + rnd() * 0.3), rr = r * (0.42 + rnd() * 0.18);
-      const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
-      ctx.moveTo(bx + rr, by);
-      ctx.arc(bx, by, rr, 0, TAU);
-    }
-  }
-  ctx.fill();
-  // 3) 밝은 쪽 (북서) 물감
-  ctx.fillStyle = rgba(PAL.treeLight, 0.55);
+  };
+  const fillLobes = (filter, color, alpha, sc, seedOff = 0) => {
+    ctx.fillStyle = rgba(color, alpha);
+    ctx.beginPath();
+    for (const n of idx) if (filter(tt[n + 3], n)) lobes(n, sc, seedOff);
+    ctx.fill();
+  };
+  const broad = (k) => k !== 0;
+  const pine = (k) => k === 0;
+  const BROAD = mixHex(PAL.forest, PAL.treeDark, 0.3);
+  const BROAD2 = mixHex(PAL.treeLight, PAL.forest, 0.5);
+  // 1) 번짐 테두리 (옅고 넓게) → 2) 몸 물감 (두 가지 빛깔을 섞어서)
+  fillLobes(broad, BROAD, 0.22, 1.18);
+  fillLobes((k, n) => k !== 0 && (tt[n + 4] & 1), BROAD, 0.62, 1, 0);
+  fillLobes((k, n) => k !== 0 && !(tt[n + 4] & 1), BROAD2, 0.66, 1, 0);
+  fillLobes(pine, PAL.pine, 0.24, 1.15, 5);
+  fillLobes(pine, mixHex(PAL.pine, PAL.ink, 0.12), 0.74, 0.95, 5);
+  // 3) 밝은 쪽(북서) 잎 몇 점
+  ctx.fillStyle = rgba(mixHex(PAL.treeLight, PAL.paper, 0.25), 0.38);
   ctx.beginPath();
   for (const n of idx) {
     const kind = tt[n + 3];
     const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    const rr = r * (kind === 0 ? 0.3 : 0.42);
-    const bx = x - r * 0.24, by = y - r * 0.28;
-    ctx.moveTo(bx + rr, by);
-    ctx.arc(bx, by, rr, 0, TAU);
+    srand(tt[n + 4] + 23);
+    const cnt = kind === 0 ? 2 : 4;
+    for (let b = 0; b < cnt; b++) {
+      const a = -2.3 + (rnd() - 0.5) * 1.6, d = r * (0.2 + rnd() * 0.35), rr = r * (0.12 + rnd() * 0.12);
+      const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
+      ctx.moveTo(bx + rr * 1.3, by);
+      ctx.ellipse(bx, by, rr * 1.3, rr, rnd() - 0.5, 0, TAU);
+    }
   }
   ctx.fill();
   // 4) 버들: 늘어진 가지 붓선
@@ -1194,60 +1208,70 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
     }
   }
   ctx.stroke();
-  // 5) 점엽 먹점 (활엽) — 아래·오른쪽(그늘)에 많이
-  ctx.fillStyle = rgba(PAL.ink, 0.42);
-  ctx.beginPath();
-  for (const n of idx) {
-    const kind = tt[n + 3];
-    if (kind === 0 || kind === 2) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 11);
-    const cnt = kind === 3 ? 26 : 13;
-    for (let b = 0; b < cnt; b++) {
-      const a = rnd() * TAU, d = r * (0.45 + rnd() * 0.5);
-      const shade = Math.cos(a - 0.8) > -0.2 || rnd() < 0.35;
-      if (!shade) continue;
-      const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d, rr = r * (0.06 + rnd() * 0.06);
-      ctx.moveTo(dx + rr * 1.5, dy);
-      ctx.ellipse(dx, dy, rr * 1.5, rr, a + 1.2, 0, TAU);
-    }
-  }
-  ctx.fill();
-  // 6) 솔잎: 진한 먹 바늘 덩어리
-  ctx.strokeStyle = rgba(PAL.ink, 0.58);
-  ctx.lineWidth = 0.065;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  for (const n of idx) {
-    if (tt[n + 3] !== 0) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 13);
-    const clusters = 5 + ((rnd() * 3) | 0);
-    for (let c = 0; c < clusters; c++) {
-      const a = rnd() * TAU, d = r * (0.15 + rnd() * 0.55);
-      const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
-      const L = r * (0.22 + rnd() * 0.1);
-      const a0 = rnd() * TAU;
-      for (let k = 0; k < 7; k++) {
-        const aa = a0 + (k / 7) * TAU;
-        ctx.moveTo(cx + Math.cos(aa) * L * 0.25, cy + Math.sin(aa) * L * 0.25);
-        ctx.lineTo(cx + Math.cos(aa) * L, cy + Math.sin(aa) * L);
+  // 5) 점엽: 가로로 누운 먹 점 (그늘 쪽·가장자리에 많이)
+  for (const [al, dark] of [[0.3, false], [0.55, true]]) {
+    ctx.fillStyle = rgba(dark ? PAL.ink : mixHex(PAL.ink, PAL.treeDark, 0.5), al);
+    ctx.beginPath();
+    for (const n of idx) {
+      const kind = tt[n + 3];
+      if (kind === 0 || kind === 2) continue;
+      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+      srand(tt[n + 4] + (dark ? 31 : 11));
+      const cnt = Math.round((kind === 3 ? 2.6 : 1.9) * r * r * (dark ? 0.45 : 1));
+      for (let b = 0; b < cnt; b++) {
+        const a = rnd() * TAU, d = r * Math.sqrt(0.08 + rnd() * 0.84);
+        const shade = Math.cos(a - 0.85);
+        if (shade < -0.35 && rnd() < 0.75) continue;
+        if (dark && shade < 0.1) continue;
+        const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d;
+        const rr = r * (0.055 + rnd() * 0.05);
+        const rot = (rnd() - 0.5) * 0.7;
+        ctx.moveTo(dx + rr * 1.8 * Math.cos(rot), dy + rr * 1.8 * Math.sin(rot));
+        ctx.ellipse(dx, dy, rr * 1.8, rr * 0.8, rot, 0, TAU);
       }
     }
+    ctx.fill();
   }
-  ctx.stroke();
-  // 7) 활엽 외곽 먹선 일부 (남동쪽 호)
-  ctx.strokeStyle = rgba(PAL.ink, 0.35);
-  ctx.lineWidth = 0.08;
+  // 6) 솔잎: 진한 먹 바늘 덩어리 (방사형 짧은 획)
+  ctx.lineCap = 'round';
+  for (const [al, w, sc, so] of [[0.4, 0.05, 1.05, 13], [0.68, 0.065, 0.8, 37]]) {
+    ctx.strokeStyle = rgba(PAL.ink, al);
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    for (const n of idx) {
+      if (tt[n + 3] !== 0) continue;
+      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+      srand(tt[n + 4] + so);
+      const clusters = 4 + ((rnd() * 3) | 0);
+      for (let c = 0; c < clusters; c++) {
+        const a = rnd() * TAU, d = r * (0.12 + rnd() * 0.5);
+        const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
+        const L = r * (0.2 + rnd() * 0.12) * sc;
+        const a0 = rnd() * TAU;
+        for (let k = 0; k < 8; k++) {
+          const aa = a0 + (k / 8) * TAU + (rnd() - 0.5) * 0.3;
+          ctx.moveTo(cx + Math.cos(aa) * L * 0.2, cy + Math.sin(aa) * L * 0.2);
+          ctx.lineTo(cx + Math.cos(aa) * L, cy + Math.sin(aa) * L);
+        }
+      }
+    }
+    ctx.stroke();
+  }
+  // 7) 활엽 외곽 먹선 일부 (남동쪽 호, 끊어지게)
+  ctx.strokeStyle = rgba(PAL.ink, 0.3);
+  ctx.lineWidth = 0.07;
   ctx.beginPath();
   for (const n of idx) {
     const kind = tt[n + 3];
     if (kind === 0 || kind === 2) continue;
     const x = tt[n], y = tt[n + 1], r = tt[n + 2];
     srand(tt[n + 4] + 17);
-    const a0 = -0.3 + rnd() * 0.4, a1 = a0 + 1.4 + rnd() * 0.8;
-    ctx.moveTo(x + Math.cos(a0) * r * 0.9, y + Math.sin(a0) * r * 0.9);
-    ctx.arc(x, y, r * 0.9, a0, a1);
+    for (let q = 0; q < 2; q++) {
+      const a0 = -0.2 + q * 1.1 + rnd() * 0.4, a1 = a0 + 0.5 + rnd() * 0.5;
+      const rr = r * (0.86 + rnd() * 0.1);
+      ctx.moveTo(x + Math.cos(a0) * rr, y + Math.sin(a0) * rr);
+      ctx.arc(x, y, rr, a0, a1);
+    }
   }
   ctx.stroke();
   // 8) 감나무 열매
@@ -1265,7 +1289,6 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
     }
   }
   ctx.fill();
-  void passes;
   return idx.length;
 }
 
