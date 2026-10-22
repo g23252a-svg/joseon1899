@@ -3,7 +3,7 @@
 
 import { FONT, PAL } from '../engine/palette.js';
 import { clamp, mixHex, rgba, sijin, TAU } from '../engine/util.js';
-import { clamp01, dpr, formatMoney, h, safe, setAttr, setClass, setHidden, setStyle, setText, viewW } from './dom.js';
+import { clamp01, compactView, dpr, formatMoney, h, safe, setAttr, setClass, setHidden, setStyle, setText } from './dom.js';
 import { drawMarker, drawPlayerArrow, drawVehicleMark } from './icons.js';
 import { collectMarkers, drawImageClipped, drawLines, getLocalMap, getMapImage, warmMapImage } from './maputil.js';
 
@@ -58,7 +58,8 @@ export function createHud(ui, game) {
 
   // ---------------------------------------------------------------- 오른쪽 위: 미니맵 + 지역·시각
   const miniCv = document.createElement('canvas');
-  const mini = h('button', { class: 'jx-mini', type: 'button', 'aria-label': '작은 지도. 누르면 큰 지도를 펼칩니다', onclick: () => ui.openPanel('map') }, miniCv);
+  // 대화로 멈춘 동안에는 M 키처럼 지도를 열지 않는다 (메뉴가 대화를 덮어 버리므로)
+  const mini = h('button', { class: 'jx-mini', type: 'button', 'aria-label': '작은 지도. 누르면 큰 지도를 펼칩니다', onclick: () => !game.paused && ui.openPanel('map') }, miniCv);
   const region = h('div', { class: 'jx-region' });
   const clockEl = h('div', { class: 'jx-clock' });
   el.append(h('div', { class: 'jx-tr' }, mini, h('div', { class: 'jx-where' }, region, clockEl)));
@@ -98,9 +99,10 @@ export function createHud(ui, game) {
   let hoanK = 0, lowK = 0;
   const deltas = []; // 돈 변화 떠오르는 글자
   let lastRegionPos = { x: NaN, y: NaN };
+  let markerCache = [], markerT = -1;
 
   function measure() {
-    const narrow = viewW() < 640;
+    const narrow = compactView();
     coreSize = narrow ? 40 : 54;
     miniSize = narrow ? 112 : 176;
     for (const c of cores) c.sig = '';
@@ -108,6 +110,16 @@ export function createHud(ui, game) {
   }
   measure();
   game.on('resize', measure);
+  // 웹 글꼴(Song Myung)이 늦게 오면 심지 글자(體·氣·虎)를 다시 그린다 (값이 바뀔 때만 그리므로)
+  try {
+    const redraw = () => {
+      for (const c of cores) c.sig = '';
+    };
+    document.fonts?.ready?.then?.(redraw);
+    document.fonts?.addEventListener?.('loadingdone', redraw);
+  } catch (err) {
+    /* 글꼴 API 없음 */
+  }
 
   game.on('money', (p) => {
     const d = Math.round(Number(p?.delta) || 0);
@@ -237,7 +249,7 @@ export function createHud(ui, game) {
       lastWanted = lvl;
     }
 
-    const hasHonor = w && typeof w.honor === 'number';
+    const hasHonor = w && Number.isFinite(w.honor);
     setHidden(honor, !hasHonor);
     if (hasHonor) {
       const tier = safe(() => w.honorTier?.(), null) || (w.honor > 60 ? 'noble' : w.honor > 20 ? 'decent' : w.honor > -20 ? 'neutral' : w.honor > -60 ? 'rough' : 'outlaw');
@@ -301,8 +313,12 @@ export function createHud(ui, game) {
       ctx.strokeRect(ax, ay, bx - ax, by - ay);
     }
 
-    // 표식
-    const markers = collectMarkers(game);
+    // 표식 (미션 시스템의 markers()/available() 는 1/10초마다만 묻는다: 미니맵은 1초에 30번 그린다)
+    if (clock - markerT > 0.1 || clock < markerT) {
+      markerT = clock;
+      markerCache = collectMarkers(game);
+    }
+    const markers = markerCache.slice();
     const wp = game.waypoint;
     if (wp && typeof wp.x === 'number') {
       const [wx, wy] = tf(wp.x, wp.y);
@@ -381,8 +397,11 @@ export function createHud(ui, game) {
     }
     const t = game.sys.time;
     const wch = WEATHER[t?.weather];
-    setText(clockEl, `${sijin(game.hour)}${wch ? ` · ${wch[0]}` : ''}`);
-    setAttr(clockEl, 'title', `${sijin(game.hour)}${wch ? `, ${wch[1]}` : ''}${t?.day ? `, ${t.day}일째` : ''}`);
+    // sijin() 은 0~24 밖이나 NaN 이면 'undefined시' 를 돌려주므로 감싸 둔다
+    const hr = ((Number(game.hour) % 24) + 24) % 24 || 0;
+    const sj = sijin(hr);
+    setText(clockEl, `${sj}${wch ? ` · ${wch[0]}` : ''}`);
+    setAttr(clockEl, 'title', `${sj}${wch ? `, ${wch[1]}` : ''}${t?.day ? `, ${t.day}일째` : ''}`);
   }
 
   function updateObjective() {
@@ -636,7 +655,11 @@ export function createHud(ui, game) {
       el.setAttribute('aria-hidden', v ? 'false' : 'true');
       if (v) {
         miniAcc = whereAcc = objAcc = 1;
+        markerT = -1;
         lastRegionPos = { x: NaN, y: NaN };
+      } else if (game.canvas?.style) {
+        // 조준하던 채로 처음 화면 등으로 가면 drawOverlay 가 안 불려 커서가 숨은 채 남는다
+        setStyle(game.canvas, 'cursor', '');
       }
     },
     setDim(v) {

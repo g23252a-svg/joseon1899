@@ -91,7 +91,8 @@ class TimeSystem {
     this.weatherLocked = false;
     this.wind = { angle: -0.8, strength: 0.28 };
     this.windHome = -0.8; // 남서풍
-    this.curfewEnabled = false; // 1895 년 통금(인정·파루) 폐지 — 필요하면 켠다
+    // 계약(ARCHITECTURE §5): curfew() = 인정(22시)~파루(4시) 사이인가. 통금을 없애려면 setCurfew(false)
+    this.curfewEnabled = true;
     this.curfewStart = 22;
     this.curfewEnd = 4;
     this.frozen = false; // true 면 시계가 멈춤(컷신 등)
@@ -128,7 +129,7 @@ class TimeSystem {
   isDusk() {
     return this.hour >= 18 && this.hour < 20.5;
   }
-  /** 통금 여부 (기본 꺼짐) */
+  /** 통금 여부: 인정~파루(curfewStart~curfewEnd). curfewEnabled=false 면 늘 false */
   curfew() {
     if (!this.curfewEnabled) return false;
     const h = this.hour, a = this.curfewStart, b = this.curfewEnd;
@@ -746,7 +747,8 @@ class TimeSystem {
     }
     // 플레이어 둘레는 옅고 멀수록 짙게
     const p = game.player;
-    const ps = p ? cam.worldToScreen(p.x, p.y) : { x: W / 2, y: H / 2 };
+    let ps = p ? cam.worldToScreen(p.x, p.y) : null;
+    if (!ps || !Number.isFinite(ps.x) || !Number.isFinite(ps.y)) ps = { x: W / 2, y: H / 2 }; // createRadialGradient 는 NaN 에 예외
     const r0 = 6 * z, r1 = Math.max(r0 + 10, 45 * z);
     const g = ctx.createRadialGradient(ps.x, ps.y, r0, ps.x, ps.y, r1);
     g.addColorStop(0, rgba(col, 0.1 * f));

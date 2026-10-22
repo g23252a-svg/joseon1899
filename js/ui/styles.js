@@ -369,7 +369,10 @@ export function buildCSS() {
 .jx-side { display: flex; flex-direction: column; gap: 18px; }
 .jx-field { display: grid; gap: 6px; }
 .jx-field label { font-family: var(--jx-display); font-size: 16px; display: flex; justify-content: space-between; }
-.jx-range { width: 100%; height: 30px; accent-color: ${PAL.ink}; pointer-events: auto; touch-action: pan-x; }
+.jx-range { flex: 1; min-width: 0; width: 100%; height: 30px; accent-color: ${PAL.ink}; pointer-events: auto; touch-action: pan-x; }
+.jx-vol-row { display: flex; align-items: center; gap: 10px; }
+.jx-vol-row .jx-mute { flex: none; min-height: 36px; padding: 2px 12px; font-size: 14px; }
+.jx-vol-row .jx-mute[aria-pressed='true'] { color: var(--jx-seal); }
 .jx-links { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
 .jx-links .jx-btn { font-size: 14px; padding: 4px 8px; }
 
@@ -396,6 +399,8 @@ export function buildCSS() {
 .jx-title-menu { grid-column: 1; grid-row: 1; align-self: end; display: flex; flex-direction: column; gap: 10px; width: min(330px, calc(100% - 32px)); padding: 0 0 clamp(26px, 8vh, 84px); margin-left: clamp(16px, 6vw, 100px); animation: jx-fadein 1s 0.9s ease-out both; }
 .jx-title-menu .jx-btn { justify-content: space-between; min-height: 52px; font-size: 18px; }
 .jx-title-foot { margin-top: 6px; font-size: 12px; color: var(--jx-ink3); line-height: 1.6; }
+.jx-title-foot:empty { display: none; }
+.jx-touch-on .jx-keys-only { display: none; }
 
 /* ---------- 터치 ---------- */
 .jx-touch { position: absolute; inset: 0; z-index: 2; pointer-events: none; display: none; }
@@ -409,10 +414,15 @@ export function buildCSS() {
 .jx-tbtn.jx-big { width: 80px; height: 80px; font-size: 16px; color: var(--jx-paper); background: ${inkA(0.74)} var(--jx-noise); }
 .jx-tbtn.jx-held { background-color: var(--jx-ink); color: var(--jx-paper); transform: scale(0.94); }
 .jx-tbtn.jx-gold { box-shadow: inset 0 0 0 2px var(--jx-gold); }
-.jx-touch-on .jx-prompts { bottom: 252px; }
-.jx-touch-on .jx-prompt { pointer-events: auto; }
-.jx-touch-on .jx-veh { bottom: 252px; }
+/* 터치: 상호작용 단추는 오른손 단추 무리 위에 세로로(누르기 쉽게), 탈것 표시는 왼쪽 막대 위로 */
+.jx-touch-on .jx-prompts { left: auto; right: 14px; transform: none; bottom: 252px; flex-direction: column; align-items: flex-end; gap: 8px; max-width: min(60%, 320px); }
+.jx-touch-on .jx-prompt { pointer-events: auto; min-height: 40px; padding: 2px 4px; }
+.jx-touch-on .jx-veh { right: auto; left: 14px; bottom: 200px; text-align: left; }
+.jx-touch-on .jx-veh-bar { margin-left: 0; }
 .jx-touch-on .jx-debug { bottom: auto; top: 130px; }
+/* 터치 + 멈추지 않는 대화(pause:false): 위로 올리고 손가락은 통과시킨다 (넘기기는 '행동' 단추·자동) */
+.jx-touch-on .jx-dlg.jx-nb { top: 132px; bottom: auto; min-height: 0; padding-top: 18px; padding-bottom: 20px; pointer-events: none; cursor: default; }
+.jx-touch-on .jx-dlg.jx-nb .jx-dlg-text { min-height: 0; }
 
 /* ---------- 중간 폭: 목표 줄을 왼쪽 HUD 아래로 ---------- */
 @media (max-width: 1099px) {
@@ -437,7 +447,7 @@ export function buildCSS() {
   .jx-prompts { bottom: 18px; }
   .jx-veh { right: 10px; bottom: 16px; }
   .jx-hud.jx-riding .jx-prompts { bottom: 104px; }
-  .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 336px; }
+  .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 252px; }
   .jx-banner { top: 24%; }
   .jx-veh-gait { font-size: 28px; }
   .jx-panel { width: 100%; height: 100%; padding: 0; box-shadow: none; animation: none; }
@@ -450,7 +460,9 @@ export function buildCSS() {
   .jx-head-money { display: none; }
   .jx-panel-title { font-size: 20px; }
   .jx-panel-body { padding: 14px 12px; }
-  .jx-inv { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; gap: 10px; }
+  .jx-inv { display: flex; flex-direction: column; gap: 10px; }
+  .jx-inv-list { flex: 1 1 auto; min-height: 96px; }
+  .jx-detail { flex: 0 0 auto; }
   .jx-inv-list { gap: 2px 16px; }
   .jx-cell { width: 62px; height: 62px; }
   .jx-cell canvas { width: 38px; height: 38px; }
@@ -462,10 +474,22 @@ export function buildCSS() {
   .jx-title-art { grid-column: 1; grid-row: 1; justify-content: center; padding: clamp(20px, 5vh, 40px) 16px 0; min-height: 0; overflow: hidden; }
   .jx-title-main { font-size: clamp(44px, min(8.5vh, 15vw), 96px); }
   .jx-title-sub { margin-top: clamp(24px, 6vh, 60px); font-size: clamp(18px, min(3.2vh, 6vw), 28px); }
+  .jx-title-sub > span { display: block; }
+  .jx-title-sub > span + span { margin-block-start: 0.25em; padding-top: 1.8em; }
   .jx-title-seal { width: 48px; height: 48px; font-size: 18px; }
   .jx-title-menu { grid-row: 2; width: auto; margin: 0 16px; padding-bottom: 22px; }
   .jx-dlg { padding: 20px 16px 26px; }
   .jx-dlg-portrait { width: 48px; height: 48px; font-size: 28px; }
+}
+/* 좁고 낮은 세로 화면 (작은 휴대폰): 제목이 단추에 가려 잘리지 않게 */
+@media (max-width: 639px) and (max-height: 660px) {
+  .jx-title-art { padding-top: 14px; }
+  .jx-title-art > div { gap: 10px !important; }
+  .jx-title-main { font-size: clamp(34px, 6.6vh, 60px); }
+  .jx-title-seal { width: 40px; height: 40px; font-size: 15px; }
+  .jx-title-sub { margin-top: 16px; font-size: clamp(15px, 2.8vh, 22px); }
+  .jx-title-menu { gap: 8px; padding-bottom: 14px; }
+  .jx-title-menu .jx-btn { min-height: 44px; font-size: 16px; }
 }
 @media (max-height: 520px) and (orientation: landscape) {
   .jx-title-art { padding-top: 18px; }
@@ -474,13 +498,28 @@ export function buildCSS() {
   .jx-title-seal { width: 44px; height: 44px; font-size: 16px; }
   .jx-title-menu .jx-btn { min-height: 42px; font-size: 16px; }
   .jx-tbtns { transform: scale(0.82); transform-origin: right bottom; }
-  .jx-touch-on .jx-prompts, .jx-touch-on .jx-veh { bottom: 200px; }
+  /* 낮은 가로 화면: HUD 를 작게 (hud.js measure 와 같은 기준) */
+  .jx-tl { left: 10px; top: 10px; gap: 6px; }
+  .jx-core { width: 40px; height: 40px; }
+  .jx-money { font-size: 16px; }
+  .jx-tr { right: 10px; top: 10px; }
+  .jx-mini { width: 112px; height: 112px; }
+  .jx-region { font-size: 14px; }
+  .jx-clock { font-size: 12px; }
+  .jx-obj { top: 96px; left: 10px; transform: none; max-width: min(calc(100% - 150px), 520px); font-size: 14px; }
+  .jx-obj-text { -webkit-line-clamp: 1; }
+  .jx-toasts { top: 172px; }
+  /* 터치: 오른쪽은 지도와 단추로 꽉 차므로 안내 단추·알림은 가운데로, 탈것 표시는 왼쪽 막대 위 */
+  .jx-touch-on .jx-prompts, .jx-touch-on .jx-hud.jx-riding .jx-prompts { left: 50%; right: auto; transform: translateX(-50%); bottom: 12px; flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: center; max-width: calc(100% - 420px); }
+  .jx-touch-on .jx-veh { bottom: 190px; }
+  .jx-touch-on .jx-veh-gait { font-size: 26px; }
+  .jx-touch-on .jx-toasts { top: 10px; left: 250px; right: 132px; width: auto; align-items: center; }
+  .jx-touch-on .jx-dlg.jx-nb { top: 24px; width: min(560px, calc(100% - 300px)); padding: 14px 16px 16px; }
 }
 @media (max-width: 479px) {
   .jx-tbtns { transform: scale(0.86); transform-origin: right bottom; }
   .jx-stick-zone { width: 52%; }
-  .jx-touch-on .jx-prompts, .jx-touch-on .jx-veh { bottom: 220px; }
-  .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 300px; }
+  .jx-touch-on .jx-prompts, .jx-touch-on .jx-hud.jx-riding .jx-prompts { bottom: 220px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .jx-root *, .jx-root *::before, .jx-root *::after { animation: none !important; transition: none !important; }

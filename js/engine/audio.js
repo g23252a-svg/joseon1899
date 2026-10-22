@@ -18,6 +18,8 @@ const HORSES = new Set(['horse', 'pony', 'jeju_horse', 'western_horse']);
 const MAX_VOICES = 48;
 const FADE = 2.5; // 곡 크로스페이드(초)
 const rr = (a, b) => a + (b - a) * Math.random();
+/** 표에서 '제 것'만 꺼낸다 ('constructor'·'toString' 같은 이름이 Object 원형을 집지 않게) */
+const own = (o, k) => (typeof k === 'string' && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined);
 
 // ---------------------------------------------------------------- 음계
 
@@ -73,8 +75,8 @@ const TRACK_ALIAS = {
   market: 'town', city: 'town', village: 'town', mission: 'tense', danger: 'tense', sad: 'night', menu: 'title',
 };
 function resolveTrack(id) {
-  if (TRACKS[id]) return id;
-  if (TRACK_ALIAS[id]) return TRACK_ALIAS[id];
+  if (own(TRACKS, id)) return id;
+  if (own(TRACK_ALIAS, id)) return TRACK_ALIAS[id];
   const s = String(id);
   if (/night|밤/.test(s)) return 'night';
   if (/combat|fight|wanted|chase|battle|전투|수배|추격/.test(s)) return 'wanted';
@@ -216,7 +218,7 @@ const SFX = {
 
   gun_matchlock(A, out, t, p, o) {
     // 치익(심지·화약 접시) → 쾅(둔탁한 폭음)
-    const fuse = o.fuse ?? 0.16;
+    const fuse = Number.isFinite(o.fuse) ? clamp(o.fuse, 0, 2) : 0.16;
     if (fuse > 0) {
       A.noise(out, t, { dur: fuse + 0.04, vol: 0.2, a: 0.015, type: 'highpass', f: 4200, q: 0.7, am: [1, 0.3, 0.9, 0.5, 1, 0.2, 0.8], amStep: 0.025 });
       A.noise(out, t + fuse * 0.6, { dur: 0.08, vol: 0.25, a: 0.004, type: 'bandpass', f: 2500, q: 1 }); // 화약 접시 '푸슉'
@@ -595,6 +597,7 @@ class AudioSystem {
     this._frogT = 2;
     this._muffled = false;
     this._lastWanted = 0;
+    this._loading = false; // 불러오는 동안(deserialize 가 내는 item:add·vehicle:enter 등) 효과음을 내지 않는다
     this._loadSettings();
   }
 
@@ -658,13 +661,14 @@ class AudioSystem {
   /** 효과음. opts: {x, y, volume, pitch, delay, range, ...소리별 옵션} */
   play(name, opts = {}) {
     const c = this.ctx;
-    if (!c || this._muted || c.state !== 'running') return false;
+    if (!c || this._muted || c.state !== 'running' || this._loading) return false;
     if (!opts || typeof opts !== 'object') opts = {};
-    const key = SFX[name] ? name : ALIAS[name];
-    const fn = key && SFX[key];
-    if (!fn) return false;
+    const key = own(SFX, name) ? name : own(ALIAS, name);
+    const fn = own(SFX, key);
+    if (typeof fn !== 'function') return false;
     const now = c.currentTime;
-    const at = Number.isFinite(opts.at) ? opts.at : null;
+    // 너무 먼 미래에 걸어 둔 소리가 목소리 칸을 오래 차지하지 않게 30초 안으로
+    const at = Number.isFinite(opts.at) ? clamp(opts.at, now, now + 30) : null;
     if (at == null && now - (this._last[key] ?? -9) < (THROTTLE[key] ?? 0.025)) return false;
     this._pruneVoices(now);
     if (this._voices.length >= MAX_VOICES && !opts.important) return false;
@@ -674,7 +678,8 @@ class AudioSystem {
     if (Number.isFinite(opts.x) && Number.isFinite(opts.y)) {
       const L = this._listener();
       const dx = opts.x - L.x, dy = opts.y - L.y, d = Math.hypot(dx, dy);
-      const range = (RANGE[key] ?? 60) * (opts.range ?? 1);
+      const rm = Number(opts.range ?? 1);
+      const range = (RANGE[key] ?? 60) * (Number.isFinite(rm) ? rm : 1);
       if (d >= range) return false;
       const k = 1 - d / range;
       vol *= Math.pow(k, 1.5);
@@ -687,7 +692,7 @@ class AudioSystem {
     const p0 = Number(opts.pitch ?? 1);
     const pitch = (Number.isFinite(p0) && p0 > 0 ? clamp(p0, 0.05, 8) : 1) * (this._muffled ? 0.86 : 1);
     const delay = Number(opts.delay ?? 0);
-    const t = at ?? now + 0.004 + (Number.isFinite(delay) ? Math.max(0, delay) : 0);
+    const t = at ?? now + 0.004 + (Number.isFinite(delay) ? clamp(delay, 0, 30) : 0);
     try {
       const out = c.createGain();
       out.gain.value = vol;
@@ -728,7 +733,7 @@ class AudioSystem {
       return;
     }
     // 짧은 악구 이름이면 효과음으로
-    if (typeof trackId === 'string' && /^mission_/.test(trackId) && SFX[trackId]) {
+    if (typeof trackId === 'string' && /^mission_/.test(trackId) && own(SFX, trackId)) {
       this.play(trackId);
       return;
     }
@@ -742,7 +747,7 @@ class AudioSystem {
   ambient(kind) {
     if (kind === undefined || kind === 'auto') this.ambientMode = 'auto';
     else if (kind === null || kind === 'none' || kind === 'off') this.ambientMode = 'off';
-    else this.ambientMode = AMB_KIND[kind] ? kind : 'auto';
+    else this.ambientMode = own(AMB_KIND, kind) ? kind : 'auto';
     this._ambT = 0;
   }
 
@@ -777,6 +782,7 @@ class AudioSystem {
 
   _tick(rdt, paused) {
     const g = this.game;
+    this._loading = false; // 불러오기가 도중에 실패해 'save:load' 가 안 와도 다음 틱엔 풀린다
     if (g.input?.pressed?.('KeyN')) this.toggleMute();
     const c = this.ctx;
     if (!c || c.state !== 'running') return;
@@ -844,7 +850,21 @@ class AudioSystem {
     comp.ratio.value = 4;
     comp.attack.value = 0.004;
     comp.release.value = 0.25;
-    comp.connect(c.destination);
+    // 마지막 안전판: 부드러운 클리퍼 (총소리가 겹치거나 마스터를 올려도 찢어지지 않게)
+    if (c.createWaveShaper) {
+      const pre = c.createGain();
+      pre.gain.value = 0.5; // 입력 ±2 를 곡선 ±1 구간에 담는다
+      const ws = c.createWaveShaper();
+      const N = 2048, curve = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const y = ((i / (N - 1)) * 2 - 1) * 2, a = Math.abs(y);
+        curve[i] = Math.sign(y) * (a < 0.8 ? a : 0.8 + 0.2 * Math.tanh((a - 0.8) / 0.2));
+      }
+      ws.curve = curve;
+      comp.connect(pre);
+      pre.connect(ws);
+      ws.connect(c.destination);
+    } else comp.connect(c.destination);
     this.muffle = this.biquad('lowpass', 20000, 0.5);
     this.muffle.connect(comp);
     this.masterGain = c.createGain();
@@ -1408,7 +1428,9 @@ class AudioSystem {
       // 타이틀에서 손으로 고른 'title' 곡이 놀이 내내 남지 않게
       if (this.musicMode === 'manual' && this._manualTrack === 'title') this.music('auto');
     });
+    g.on('save:beforeLoad', () => (this._loading = true));
     g.on('save:load', () => {
+      this._loading = false;
       this._hold = false;
       this._combatUntil = -1;
       this._lastWanted = this.game.sys.wanted?.level ?? 0;
@@ -1431,7 +1453,7 @@ class AudioSystem {
   /** 무기 → 총소리 이름. 무기 정의에 sound 가 있으면 그것을 쓴다 */
   _weaponSound(w) {
     const def = this._weaponDef(w);
-    if (def?.sound && (SFX[def.sound] || ALIAS[def.sound])) return def.sound;
+    if (def?.sound && (own(SFX, def.sound) || own(ALIAS, def.sound))) return def.sound;
     const s = `${typeof w === 'string' ? w : def?.id || ''} ${def?.name || ''}`.toLowerCase();
     if (/match|hwaseung|jochong|화승|조총/.test(s)) return 'gun_matchlock';
     if (/revolver|pistol|yukhyeol|육혈|권총|단총/.test(s)) return 'gun_revolver';
@@ -1500,7 +1522,7 @@ class AudioSystem {
     if (places && typeof places === 'object') {
       for (const k in places) {
         const pl = places[k];
-        const wt = TOWN_W[pl?.kind];
+        const wt = own(TOWN_W, pl?.kind);
         if (!wt || !Number.isFinite(pl.x)) continue;
         const R = pl.radius || 80;
         const d = Math.hypot(pl.x - L.x, pl.y - L.y);
@@ -1762,7 +1784,7 @@ class AudioSystem {
       gp.linearRampToValueAtTime(0.0001, now + FADE);
       pl.stopAt = now + FADE;
     }
-    const def = id && TRACKS[id];
+    const def = own(TRACKS, id);
     if (!def) return;
     const out = c.createGain();
     out.gain.setValueAtTime(0.0001, now);

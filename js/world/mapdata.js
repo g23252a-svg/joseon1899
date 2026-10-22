@@ -186,6 +186,7 @@ export const MAP = {
     { id: 'gwanak_path', name: '관악산 길', kind: 'path', width: 3, points: [[2600, 1730], [2700, 1850], [2780, 1990]] },
     { id: 'bupyeong_road', name: '부평길', kind: 'road', width: 5, points: [[640, 1610], [700, 1545], [760, 1490], [860, 1580], [980, 1720], [1060, 1800], [1120, 1873]] },
     { id: 'gyeyang_path', name: '계양산 길', kind: 'path', width: 2.5, points: [[760, 1490], [800, 1400], [850, 1330]] },
+    { id: 'yangcheon_path', name: '양천 나루길', kind: 'path', width: 3, points: [[1160, 1012], [1130, 1110], [1110, 1220], [1090, 1320], [1010, 1410], [880, 1465], [760, 1490]] },
     { id: 'hwalbin_path', name: '산채 가는 길', kind: 'path', width: 2.5, points: [[1120, 1873], [1180, 1990], [1250, 2100], [1310, 2185]] },
     { id: 'suri_path', name: '수리산 길', kind: 'path', width: 2.5, points: [[1780, 1857], [1700, 2000], [1600, 2150], [1480, 2200]] },
     // 제물포 거리
@@ -196,7 +197,14 @@ export const MAP = {
     { id: 'jm_st5', kind: 'street', width: 6, points: [[560, 1565], [560, 1745]] },
     { id: 'jm_st6', kind: 'street', width: 5, points: [[620, 1585], [620, 1720]] },
   ],
-  bridges: [],
+  bridges: [
+    { id: 'gyeonghoeru_br', name: '경회루 돌다리', points: [[2668, 421], [2696, 421]], width: 4 },
+  ],
+  // 나룻배 자리: 물 건너 두 점 (길찾기 간선, 탈것 담당이 나룻배를 띄울 자리)
+  ferries: [
+    { id: 'ferry_noryang', name: '노량 나루', a: { x: 2565, y: 1540 }, b: { x: 2520, y: 1594 }, from: 'ferry_yongsan', to: 'ferry_noryang', fare: 5 },
+    { id: 'ferry_haengju', name: '행주 나루', a: { x: 1160, y: 897 }, b: { x: 1160, y: 991 }, from: 'ferry_haengju', to: 'ferry_yangcheon', fare: 5 },
+  ],
   lines: [
     {
       id: 'tram', name: '전차 (서대문–청량리)', kind: 'rail', points: TRAM,
@@ -226,7 +234,7 @@ export const MAP = {
     },
   ],
   settlements: [
-    { id: 'hanseong', name: '한성', kind: 'city', x: 2840, y: 760, r: 470, houses: 760, style: 'mixed', seed: 11 },
+    { id: 'hanseong', name: '한성', kind: 'city', x: 2840, y: 760, r: 470, houses: 1500, style: 'mixed', seed: 11 },
     { id: 'jeongdong', name: '정동', kind: 'town', x: 2440, y: 860, r: 60, houses: 6, style: 'western', seed: 12 },
     { id: 'seodaemun_out', name: '서대문 밖', kind: 'village', x: 2230, y: 740, r: 70, houses: 14, style: 'choga', seed: 13 },
     { id: 'dongdaemun_out', name: '동대문 밖', kind: 'village', x: 3400, y: 800, r: 70, houses: 14, style: 'choga', seed: 14 },
@@ -250,7 +258,7 @@ export const MAP = {
     // 궁궐
     { id: 'geunjeongjeon', kind: 'palace', name: '경복궁 근정전', x: 2710, y: 500, w: 36, h: 24, angle: 0, tags: ['palace', 'landmark'] },
     { id: 'sajeongjeon', kind: 'palace', name: '경복궁 사정전', x: 2710, y: 440, w: 22, h: 14, angle: 0, tags: ['palace'] },
-    { id: 'gyeonghoeru', kind: 'pavilion', name: '경회루', x: 2660, y: 421, w: 22, h: 17, angle: 0, tags: ['palace', 'landmark'] },
+    { id: 'gyeonghoeru', kind: 'pavilion', name: '경회루', x: 2660, y: 421, w: 22, h: 17, angle: 0, front: 'e', tags: ['palace', 'landmark'] },
     { id: 'junghwajeon', kind: 'palace', name: '경운궁 중화전', x: 2555, y: 912, w: 24, h: 16, angle: 0, tags: ['palace', 'landmark'] },
     // 종로
     { id: 'hanseongbu', kind: 'office', name: '한성부', x: 2660, y: 680, w: 22, h: 14, angle: 0, tags: ['office'] },
@@ -303,6 +311,7 @@ export const MAP = {
     { id: 'pier_yongsan', kind: 'pier', name: '용산나루', x: 2565, y: 1532, w: 8, h: 28, angle: 0 },
     { id: 'pier_noryang', kind: 'pier', name: '노량진나루', x: 2520, y: 1605, w: 8, h: 28, angle: 0 },
     { id: 'pier_haengju', kind: 'pier', name: '행주나루', x: 1160, y: 888, w: 8, h: 26, angle: 0 },
+    { id: 'pier_yangcheon', kind: 'pier', name: '양천 나루', x: 1160, y: 1000, w: 8, h: 24, angle: 0 },
     { id: 'pier_wolmi', kind: 'pier', name: '월미도 선착장', x: 318, y: 1612, w: 26, h: 7, angle: 0 },
   ],
   places: [
@@ -338,6 +347,7 @@ export const MAP = {
     { id: 'ferry_yongsan', name: '용산나루', kind: 'ferry', x: 2565, y: 1514, radius: 30 },
     { id: 'ferry_noryang', name: '노량진나루', kind: 'ferry', x: 2520, y: 1624, radius: 30 },
     { id: 'ferry_haengju', name: '행주나루', kind: 'ferry', x: 1160, y: 872, radius: 30 },
+    { id: 'ferry_yangcheon', name: '양천 나루', kind: 'ferry', x: 1160, y: 1016, radius: 25 },
     { id: 'port_jemulpo', name: '제물포 부두', kind: 'port', x: 432, y: 1625, radius: 40, tags: ['steamer'] },
     { id: 'ferry_wolmi', name: '월미도 선착장', kind: 'ferry', x: 300, y: 1612, radius: 20 },
     { id: 'mt_bukhan', name: '북한산', hanja: '北漢山', kind: 'mountain', x: 2450, y: 60, radius: 250 },

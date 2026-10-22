@@ -176,6 +176,14 @@ export function dpr() {
 export function viewW() {
   return (typeof window !== 'undefined' && window.innerWidth) || 800;
 }
+export function viewH() {
+  return (typeof window !== 'undefined' && window.innerHeight) || 600;
+}
+/** 작은 HUD 를 쓸 화면: 폭 < 640 또는 낮은 가로 화면 (styles.js 의 미디어 쿼리와 같은 기준) */
+export function compactView() {
+  const w = viewW(), hh = viewH();
+  return w < 640 || (hh <= 520 && w > hh);
+}
 
 // ---------------------------------------------------------------- 저장소 (항상 try/catch)
 

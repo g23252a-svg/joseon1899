@@ -55,6 +55,10 @@ export function createMapView(c) {
 
   function clampView() {
     const s = ws();
+    // NaN 은 clamp 를 그대로 통과해 지도를 영영 망가뜨리므로 (플레이어 좌표가 깨졌을 때 등) 가운데로 되돌린다
+    if (!Number.isFinite(view.cx)) view.cx = s.w / 2;
+    if (!Number.isFinite(view.cy)) view.cy = s.h / 2;
+    if (!Number.isFinite(view.scale) || view.scale <= 0) view.scale = minS;
     view.scale = clamp(view.scale, minS, maxS);
     view.cx = clamp(view.cx, 0, s.w);
     view.cy = clamp(view.cy, 0, s.h);

@@ -38,6 +38,8 @@ export function createDialogue(ui, game) {
   let hi = 0;
   let choiceBtns = [];
   let pausedByUs = false;
+  /** 게임을 멈추고 입력을 모두 가져가는 대화인가 (opts.pause !== false) */
+  const blocks = (q) => !!q && q.opts?.pause !== false;
 
   box.addEventListener('pointerdown', (e) => {
     if (!cur || cur.type !== 'lines') return;
@@ -65,7 +67,9 @@ export function createDialogue(ui, game) {
     }
     setHidden(box, false);
     ui._onDialogue?.(true);
-    setPause(cur.opts?.pause !== false);
+    setPause(blocks(cur));
+    // 멈추지 않는 대화: 터치 화면에서는 위로 올려 조이스틱·단추를 가리지 않게 (styles.js .jx-nb)
+    setClass(box, 'jx-nb', !blocks(cur));
     openT = 0;
     if (cur.type === 'lines') {
       cur.i = 0;
@@ -99,7 +103,8 @@ export function createDialogue(ui, game) {
     setHidden(list, true);
     setClass(box, 'jx-choosing', false);
     setHidden(hint, false);
-    setText(hintKey, ui.isTouch ? '눌러서 넘기기' : 'E · Space 넘기기');
+    const b = blocks(cur);
+    setText(hintKey, ui.isTouch ? (b ? '눌러서 넘기기' : '행동 단추로 넘기기') : b ? 'E · Space 넘기기' : 'E 넘기기');
     live.textContent = (l.speaker ? `${l.speaker}: ` : '') + full;
   }
 
@@ -129,14 +134,14 @@ export function createDialogue(ui, game) {
     lineDone = true;
     setText(text, full);
     setClass(text, 'jx-narr', !cur.opts?.speaker);
-    live.textContent = full + ' — 선택지: ' + opts.map((o, i) => `${i + 1}. ${o}`).join(', ');
+    live.textContent = full + ' — 선택지: ' + opts.map((o, i) => `${i + 1}. ${o.text}`).join(', ');
     list.textContent = '';
     choiceBtns = opts.map((o, i) => {
       const b = h(
         'button',
         { class: 'jx-choice', type: 'button', onclick: () => pick(i), onpointerenter: () => highlight(i, true), onfocus: () => highlight(i) },
         h('span', { class: 'jx-key', text: String(i + 1) }),
-        h('span', { text: o })
+        h('span', { text: o.text })
       );
       list.append(h('li', null, b));
       return b;
@@ -168,13 +173,21 @@ export function createDialogue(ui, game) {
     const done = cur;
     cur = null;
     choiceBtns = [];
-    done.resolve(i);
+    done.resolve(done.options[i].i); // 빈 선택지를 걸러냈어도 부른 쪽 배열의 번호를 돌려준다
     next();
   }
 
   /** 입력 처리 (시스템 update/updatePaused 에서). 대화가 열려 있으면 true */
   function handleInput(inp) {
     if (!cur) return false;
+    const blocking = blocks(cur);
+    if (cur.type === 'lines' && !blocking) {
+      // 멈추지 않는 대화(pause:false): 걷기·싸움 입력은 그대로 두고 E·Enter 로만 넘긴다
+      if (inp.pressed('interact') || inp.pressed('confirm')) advance();
+      inp.consume('interact');
+      inp.consume('confirm');
+      return true;
+    }
     if (cur.type === 'lines') {
       const go = inp.pressed('interact') || inp.pressed('confirm') || inp.pressed('brake') || inp.mousePressed(0);
       if (go) advance();
@@ -192,7 +205,11 @@ export function createDialogue(ui, game) {
       }
     }
     for (const a of ['interact', 'confirm', 'brake', 'enter', 'up', 'down', 'weaponNext', 'weaponPrev']) inp.consume(a);
+    if (!blocking) return true; // 멈추지 않는 선택지: 마우스는 싸움에 그대로 둔다
     inp.mouse.pressed[0] = false;
+    // 화면을 눌러 마지막 줄을 넘기면 대화가 닫힌 뒤에도 단추가 아직 눌려 있다: 다시 누를 때까지 '누름' 으로 치지 않는다
+    // (그대로 두면 멈춤이 풀리자마자 combat 이 mouseDown(0) 을 보고 쏜다)
+    inp.mouse.down[0] = false;
     return true;
   }
 
@@ -202,7 +219,8 @@ export function createDialogue(ui, game) {
     openT += dt;
     if (cur.type !== 'lines') return;
     if (!lineDone) {
-      const speed = cur.opts?.speed ?? 40;
+      const sp = Number(cur.opts?.speed);
+      const speed = sp > 0 ? sp : 40; // 0·음수·NaN 이면 글자가 영영 안 나오므로 기본값
       acc += dt * speed;
       let changed = false;
       while (shown < full.length) {
@@ -215,7 +233,8 @@ export function createDialogue(ui, game) {
       }
       if (changed) setText(text, full.slice(0, shown));
       if (shown >= full.length) lineDone = true;
-    } else if (cur.opts?.auto) {
+    } else if (cur.opts?.auto > 0 && (blocks(cur) || !game.paused)) {
+      // 멈추지 않는 대화는 메뉴가 열려 있는 동안 저절로 넘어가지 않는다
       autoT += dt;
       if (autoT >= cur.opts.auto) {
         openT = 1;
@@ -229,6 +248,10 @@ export function createDialogue(ui, game) {
     get active() {
       return !!cur;
     },
+    /** 게임을 멈추고 입력을 모두 가져가는 대화인가 (opts.pause !== false) */
+    get blocking() {
+      return blocks(cur);
+    },
     dialogue(lines, opts = {}) {
       const ls = normLines(lines);
       if (!ls.length) return Promise.resolve();
@@ -238,9 +261,12 @@ export function createDialogue(ui, game) {
       });
     },
     choice(question, options, opts = {}) {
-      const os = (Array.isArray(options) ? options : [])
-        .map((o) => (typeof o === 'string' ? o : o?.text ?? o?.label ?? String(o)))
-        .filter((o) => o !== '');
+      // 빈 선택지는 보이지 않게 거르되, 돌려줄 번호는 부른 쪽 배열 기준(i)으로 기억한다
+      const os = [];
+      (Array.isArray(options) ? options : []).forEach((o, i) => {
+        const t = o == null ? '' : typeof o === 'string' ? o : String(o.text ?? o.label ?? o);
+        if (t !== '') os.push({ text: t, i });
+      });
       if (!os.length) return Promise.resolve(-1);
       return new Promise((resolve) => {
         queue.push({ type: 'choice', question: String(question ?? ''), options: os, opts: opts || {}, resolve });

@@ -22,6 +22,7 @@ const KEY_PANELS = [
   ['journal', 'journal'],
 ];
 const KINDS = new Set(['info', 'warn', 'good', 'bad']);
+const KIND_ALIAS = new Map([['success', 'good'], ['ok', 'good'], ['warning', 'warn'], ['error', 'bad'], ['danger', 'bad'], ['fail', 'bad']]);
 
 export function install(game) {
   injectStyles();
@@ -97,14 +98,16 @@ export function install(game) {
     },
     deserialize(d) {
       const w = d?.waypoint;
-      game.waypoint = w && typeof w.x === 'number' && typeof w.y === 'number' ? { x: w.x, y: w.y } : null;
+      // NaN 도 typeof 'number' 이므로 isFinite 로 거른다 (NaN 길잡이는 영영 '다다름' 판정이 안 난다)
+      game.waypoint = w && Number.isFinite(w.x) && Number.isFinite(w.y) ? { x: w.x, y: w.y } : null;
     },
   };
 
   const hud = createHud(ui, game);
   const touch = createTouch(ui, game);
   // 처음 화면에서 연 도움말을 닫으면 포커스를 처음 화면 단추로 돌려준다 (title 은 아래에서 만든다)
-  const panels = createPanels(ui, game, { onClose: () => title.visible && title.focus() });
+  // 처음 화면에서는 도움말만 연다 (도움말의 탭으로도 다른 화면을 못 열게)
+  const panels = createPanels(ui, game, { onClose: () => title.visible && title.focus(), canOpen: (n) => !title.visible || n === 'help' });
   const dlg = createDialogue(ui, game);
   const title = createTitle(ui, game);
   ui.hud = hud;
@@ -118,6 +121,8 @@ export function install(game) {
   // ---------------------------------------------------------------- 타이틀
   function showTitle() {
     if (panels.current) panels.close();
+    // 멈추지 않는 대화(pause:false)는 쉬어가기 메뉴 → 처음 화면으로 갈 때 남아 있을 수 있다
+    if (dlg.active) dlg.closeAll();
     game.state = 'title';
     title.show();
     if (ssGet('autostart')) {
@@ -135,7 +140,7 @@ export function install(game) {
   function toast(text, kind = 'info') {
     if (text == null || text === '') return;
     text = String(text);
-    const k = KINDS.has(kind) ? kind : 'info';
+    const k = KINDS.has(kind) ? kind : KIND_ALIAS.get(kind) || 'info';
     const same = toasts.find((t) => !t.out && t.text === text && t.kind === k);
     if (same) {
       same.n++;
@@ -226,6 +231,16 @@ export function install(game) {
     if (r.honor) out.push(`의 ${r.honor > 0 ? '+' : ''}${r.honor}`);
     return out.join(' · ');
   }
+  // 불러오기 직전: 기록에 UI 몫이 없으면 deserialize 가 불리지 않으므로 지금 길잡이를 먼저 지운다
+  game.on('save:beforeLoad', () => {
+    game.waypoint = null;
+  });
+  // 불러오기 직후: 새 게임 준비(onStart)나 불러오기 과정이 남긴 미션 배너는 낡은 것이므로 버린다
+  game.on('save:load', () => {
+    pendingMB.length = 0;
+    bannerQ.length = 0;
+    if (bannerCur && !bannerCur.out) bannerCur.until = clock - 1;
+  });
   game.on('mission:start', (p) => pendingMB.push({ kind: 'start', p: p || {}, stamp: frameStamp }));
   game.on('mission:complete', (p) => pendingMB.push({ kind: 'complete', p: p || {}, stamp: frameStamp }));
   game.on('mission:fail', (p) => pendingMB.push({ kind: 'fail', p: p || {}, stamp: frameStamp }));
@@ -267,15 +282,18 @@ export function install(game) {
 
   // ---------------------------------------------------------------- 길잡이 점
   function setWaypoint(x, y) {
-    if (!isFinite(x) || !isFinite(y)) return;
+    x = Number(x);
+    y = Number(y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     game.waypoint = { x, y };
-    game.emit('waypoint', { x, y, set: true });
+    game.emit('waypoint', { x, y, set: true, reached: false });
     game.sfx?.('ui_click');
   }
   function clearWaypoint(reached = false) {
-    if (!game.waypoint) return;
+    const wp = game.waypoint;
+    if (!wp) return;
     game.waypoint = null;
-    game.emit('waypoint', { set: false, reached: !!reached });
+    game.emit('waypoint', { x: wp.x, y: wp.y, set: false, reached: !!reached });
   }
 
   // ---------------------------------------------------------------- 소리 크기 (+ 첫 입력에서 오디오 깨우기)
@@ -368,8 +386,10 @@ export function install(game) {
       return;
     }
     if (dlg.active) {
+      // 멈추는 대화는 입력을 모두 가져간다. 멈추지 않는 대화(pause:false)는 E·Enter 만 쓰고 메뉴 키 등은 아래로 넘긴다
+      const blocking = dlg.blocking;
       dlg.handleInput(inp);
-      return;
+      if (blocking) return;
     }
     if (title.visible) {
       title.handleInput(inp);
@@ -406,29 +426,43 @@ export function install(game) {
       console.error(`[ui ${name}]`, err);
     }
   }
+  // 매 프레임 쓰는 단계 함수는 한 번만 만든다 (프레임마다 클로저를 새로 만들지 않게)
+  let fCtx = null, fDt = 0, fPlaying = false;
+  const stHud = () => {
+    hud.setVisible(fPlaying);
+    hud.setDim(game.paused || dlg.active);
+    hud.update(fDt);
+  };
+  const stOverlay = () => hud.drawOverlay(fCtx, fDt);
+  const stBanner = () => {
+    tickMissionBanners();
+    tickBanner();
+  };
+  const stDialogue = () => dlg.tick(fDt);
+  const stPanel = () => panels.frame(fDt);
+  const stTitle = () => title.frame(fDt);
+  // 멈추는 대화·메뉴 중에는 game.paused 로 숨는다. 멈추지 않는 대화 중에는 계속 걷고 쏠 수 있게 둔다
+  const stTouch = () => touch.frame(fDt, fPlaying && !panels.current && !game.paused);
   function frame(ctx, dt) {
     dt = Math.min(0.1, Math.max(0, dt || 0));
     clock += dt;
     const playing = game.state === 'play' && !title.visible;
-    step('hud', () => {
-      hud.setVisible(playing);
-      hud.setDim(game.paused || dlg.active);
-      hud.update(dt);
-    });
+    fCtx = ctx;
+    fDt = dt;
+    fPlaying = playing;
+    step('hud', stHud);
     if (playing) {
       ctx.save();
-      step('overlay', () => hud.drawOverlay(ctx, dt));
+      step('overlay', stOverlay);
       ctx.restore();
     }
-    step('banner', () => {
-      tickMissionBanners();
-      tickBanner();
-    });
+    step('banner', stBanner);
     step('toast', tickToasts);
-    step('dialogue', () => dlg.tick(dt));
-    step('panel', () => panels.frame(dt));
-    step('title', () => title.frame(dt));
-    step('touch', () => touch.frame(dt, playing && !panels.current && !dlg.active && !game.paused));
+    step('dialogue', stDialogue);
+    step('panel', stPanel);
+    step('title', stTitle);
+    step('touch', stTouch);
+    fCtx = null;
     // 길잡이 점에 다다르면 지운다
     const wp = game.waypoint, p = game.player;
     if (playing && wp && p && Math.hypot(wp.x - p.x, wp.y - p.y) < 8) {

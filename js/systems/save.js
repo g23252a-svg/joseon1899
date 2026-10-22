@@ -207,7 +207,12 @@ class SaveSystem {
     if (!g.flags || typeof g.flags !== 'object') g.flags = {};
     for (const k of Object.keys(g.flags)) delete g.flags[k];
     Object.assign(g.flags, data.flags || {});
-    this._restorePlayer(data.player);
+    try {
+      this._restorePlayer(data.player);
+    } catch (err) {
+      // 플레이어 복원이 실패해도 불러오기는 끝맺는다 ('save:load' 를 기다리는 모듈이 꼬이지 않게)
+      console.warn('[save] 플레이어 복원 실패:', err?.message);
+    }
     this.loaded = true;
     this.lastSlot = slot;
     this._since = 0;
@@ -360,6 +365,7 @@ class SaveSystem {
     if (game.state !== 'play') return;
     this._play += realDt;
     this._since += realDt;
+    if (!this.autosave) this._pending = 0; // 자동 저장을 끄면 미션 완료 저장도 하지 않는다
     if (this._pending > 0 && (this._pending -= realDt) <= 0) {
       if (this._canAutosave()) this.save('auto', { quiet: true, auto: true });
       else this._pending = 2; // 살아나거나 수배가 풀리거나 뭍에 오를 때까지 다시 시도

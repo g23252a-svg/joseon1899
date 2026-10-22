@@ -74,7 +74,7 @@ export function shapeOf(def = {}) {
     case 'pelt':
       return has(s, /feather|깃/) ? 'feather' : 'pelt';
     case 'valuable':
-      if (has(s, /coin|엽전|돈|銭|전$/)) return 'coin';
+      if (has(s, /coin|yeopjeon|엽전|통보|돈|銭|전$/)) return 'coin';
       if (has(s, /letter|서찰|편지|문서|증서|지도/)) return 'scroll';
       return 'gem';
     case 'quest':

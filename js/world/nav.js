@@ -81,6 +81,38 @@ export class Nav {
     this.heap = new Heap(8192);
     this.lastFail = '';
     this.stats = { searches: 0, expanded: 0, ms: 0 };
+    // 나루(나룻배) 연결: 물을 건너뛰는 간선. {a, b(칸 번호는 모드별로 맞춤), ax, ay, bx, by, cost, modes, data}
+    this.links = [];
+    this.linkAt = {}; // mode → Map(칸 → [link…])
+  }
+
+  /**
+   * 물 건너 두 점을 잇는 간선 (나룻배 자리). cost 는 미터 환산 비용(기다림 포함), modes 는 이 간선을 쓰는 모드.
+   * buildMode 전에 부른다 (뒤에 부르면 그 모드 격자를 다시 만든다).
+   */
+  addLink(ax, ay, bx, by, opts = {}) {
+    const L = Math.hypot(bx - ax, by - ay);
+    const link = { ax, ay, bx, by, cost: opts.cost ?? L * 3 + 60, modes: opts.modes || ['foot', 'horse', 'wheel'], data: opts.data || null };
+    this.links.push(link);
+    for (const m of link.modes) if (this.grids[m]) this.buildMode(m);
+    return link;
+  }
+
+  _linkCells(mode, grid) {
+    const map = new Map();
+    for (const ln of this.links) {
+      if (!ln.modes.includes(mode)) continue;
+      const a = this.snap(grid, ln.ax, ln.ay, 3), b = this.snap(grid, ln.bx, ln.by, 3);
+      if (a < 0 || b < 0 || a === b) continue;
+      const c = (ln.cost / this.cs) * 10; // 격자 비용 단위(풀밭 1칸 ≈ 10)
+      for (const [p, q, rev] of [[a, b, false], [b, a, true]]) {
+        let arr = map.get(p);
+        if (!arr) map.set(p, (arr = []));
+        arr.push({ to: q, cost: c, link: ln, rev });
+      }
+    }
+    this.linkAt[mode] = map;
+    return map;
   }
 
   /** 모드 하나의 격자 만들기 */
@@ -141,7 +173,22 @@ export class Nav {
         }
     }
     this.grids[mode] = grid;
-    this.comps[mode] = this.label(grid);
+    const lab = this.label(grid);
+    // 나루 간선으로 이어진 성분은 하나로
+    const lm = this._linkCells(mode, grid);
+    if (lm.size) {
+      const remap = new Map();
+      const find = (x) => {
+        while (remap.has(x)) x = remap.get(x);
+        return x;
+      };
+      for (const [p, arr] of lm) for (const e of arr) {
+        const ra = find(lab[p]), rb = find(lab[e.to]);
+        if (ra !== rb) remap.set(rb, ra);
+      }
+      if (remap.size) for (let i = 0; i < lab.length; i++) if (lab[i]) lab[i] = find(lab[i]);
+    }
+    this.comps[mode] = lab;
     return grid;
   }
 
@@ -236,6 +283,8 @@ export class Nav {
       return null;
     }
     const nx = this.nx, cs = this.cs;
+    const gm = mode === 'swim' ? 'boat' : NAV_MODES.includes(mode) ? mode : 'foot';
+    const links = this.linkAt[gm] && this.linkAt[gm].size ? this.linkAt[gm] : null;
     const gx = goal % nx, gy = (goal / nx) | 0;
     const goalExact = this.cellOf(x1, y1) === goal;
     if (s === goal) return [[x0, y0], goalExact ? [x1, y1] : [(gx + 0.5) * cs, (gy + 0.5) * cs]];
@@ -291,6 +340,20 @@ export class Nav {
         M[nb] = OPEN;
         heap.push(nb, ng + H(nb));
       }
+      // 나루 간선
+      const lk = links && links.get(cur);
+      if (lk) {
+        for (const e of lk) {
+          const nb = e.to;
+          if (M[nb] === CLOSED) continue;
+          const ng = gc + e.cost;
+          if (M[nb] === OPEN && ng >= G[nb]) continue;
+          G[nb] = ng;
+          P[nb] = cur;
+          M[nb] = OPEN;
+          heap.push(nb, ng + H(nb));
+        }
+      }
     }
     this.stats.searches++;
     this.stats.expanded += expanded;
@@ -310,6 +373,17 @@ export class Nav {
       out.push([((n % nx) + 0.5) * cs, (((n / nx) | 0) + 0.5) * cs]);
     }
     out.push(goalExact ? [x1, y1] : [(gx + 0.5) * cs, (gy + 0.5) * cs]);
+    // 나루를 건너는 구간 표시: out.links = [{i, link}] (out[i] → out[i+1] 이 물 건너기)
+    if (links) {
+      const ferry = [];
+      for (let q = 0; q + 1 < smooth.length; q++) {
+        const a = smooth[q], b = smooth[q + 1];
+        if (Math.abs((a % nx) - (b % nx)) <= 1 && Math.abs(((a / nx) | 0) - ((b / nx) | 0)) <= 1) continue;
+        const e = (links.get(a) || []).find((k) => k.to === b);
+        if (e) ferry.push({ i: q, link: e.link, from: e.rev ? 'b' : 'a' });
+      }
+      if (ferry.length) out.links = ferry;
+    }
     this.stats.ms += (typeof performance !== 'undefined' ? performance.now() : 0) - t0;
     return out;
   }
@@ -324,7 +398,14 @@ export class Nav {
       let best = i + 1;
       // 너무 멀리 보지 않는다 (긴 경로에서 비용)
       const lim = Math.min(cells.length - 1, i + 40);
+      const nx = this.nx;
       for (let j = i + 1; j <= lim; j++) {
+        // 나루 간선(이웃이 아닌 칸으로 뛰기)은 건너뛰지 않는다
+        const a = cells[j - 1], b = cells[j];
+        if (Math.abs((a % nx) - (b % nx)) > 1 || Math.abs(((a / nx) | 0) - ((b / nx) | 0)) > 1) {
+          if (j === i + 1) best = j;
+          break;
+        }
         if (grid[cells[j]] > maxC) maxC = grid[cells[j]];
         if (j === i + 1 || this.los(grid, cells[i], cells[j], maxC)) best = j;
       }

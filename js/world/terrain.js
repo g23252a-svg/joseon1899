@@ -639,7 +639,7 @@ export class Terrain {
         this.rockiness[k] = rock;
       }
     // 칸 단위 분류: 높이가 있을 법한 거친 칸만
-    const g = this.grid, C = this.cols, c = this.cell, cn = this.cn, H = this.height, Rk = this.rockiness;
+    const g = this.grid, C = this.cols, c = this.cell, cn = this.cn, H = this.height, Rk = this.rockiness, tex2 = this.tex2;
     const per = hc / c; // 거친 칸 하나에 4×4 칸
     for (let j = 0; j + 1 < hrows; j++)
       for (let i = 0; i + 1 < hcols; i++) {
@@ -664,8 +664,9 @@ export class Terrain {
             g[idx] = T.MOUNTAIN;
             const rk = r00 + (r10 - r00) * tx + (r01 - r00) * ty + (r00 - r10 - r01 + r11) * tx * ty;
             const thr = 0.6 + (1 - rk) * 0.4;
-            const crag = texAt(tex, cx * 0.45 + 90, cy * 0.45 + 13);
-            if ((hh > thr && crag > 0.52) || (hh > 0.42 && crag > 0.86 - rk * 0.12)) g[idx] = T.ROCK;
+            // 바위 노이즈: 축에 맞춰 네모지지 않게 좌표를 돌리고 두 겹을 섞는다
+            const crag = texAt(tex, cx * 0.37 + cy * 0.26 + 90, cy * 0.37 - cx * 0.26 + 13) * 0.62 + texAt(tex2, cx * 0.61 - cy * 0.52 + 7, cx * 0.52 + cy * 0.61 + 31) * 0.38;
+            if ((hh > thr && crag > 0.5) || (hh > 0.42 && crag > 0.72 - rk * 0.1)) g[idx] = T.ROCK;
           }
         }
       }
@@ -681,7 +682,7 @@ export class Terrain {
       const fn = (i, t, cx, cy) => {
         if (!fi[i]) fi[i] = id;
         if (t !== T.GRASS) return -1;
-        const clear = texAt(tex, cx * 0.3 + n * 31, cy * 0.3 + n * 17) * 0.7 + (cn[i] / 255) * 0.3;
+        const clear = texAt(tex, cx * 0.25 + cy * 0.17 + n * 31, cy * 0.25 - cx * 0.17 + n * 17) * 0.7 + (cn[i] / 255) * 0.3;
         return clear > thr ? T.FOREST : -1;
       };
       if (f.poly) this.paintPolys([f.poly], 18, 3, fn);
@@ -775,12 +776,12 @@ export class Terrain {
   step_yards() {
     for (const s of this.map.settlements || []) {
       const city = s.kind === 'city';
-      const rr = s.r * (city ? 0.9 : s.kind === 'camp' ? 0.8 : 0.36);
+      const rr = s.r * (city ? 0.9 : s.kind === 'camp' ? 0.8 : 0.26);
       const cn = this.cn;
       this.paintCircle(s.x, s.y, rr, city ? 26 : 9, (i, t, cx, cy, dn) => {
         if (t !== T.GRASS && t !== T.FIELD && t !== T.FOREST && t !== T.SAND) return -1;
         const n = cn[i] / 255;
-        return n > (city ? 0.1 + dn * 0.22 : 0.3 + dn * 0.3) ? T.YARD : -1;
+        return n > (city ? 0.1 + dn * 0.22 : 0.36 + dn * 0.34) ? T.YARD : -1;
       });
     }
   }

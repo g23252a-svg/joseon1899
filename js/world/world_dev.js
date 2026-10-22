@@ -44,6 +44,13 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
   prog(0.56, 0.68)(1, '길을 익히는 중');
   await yieldFrame();
   const nav = new Nav(tr, st, 4);
+  // 나룻배 자리: 물 건너는 길찾기 간선
+  const ferries = (M.ferries || []).map((f) => {
+    const L = Math.hypot(f.b.x - f.a.x, f.b.y - f.a.y);
+    const fr = { id: f.id, name: f.name, a: { ...f.a }, b: { ...f.b }, from: f.from, to: f.to, fare: f.fare ?? 0, length: L, modes: f.modes || ['foot', 'horse', 'wheel'] };
+    nav.addLink(f.a.x, f.a.y, f.b.x, f.b.y, { cost: f.cost ?? L * 3 + 80, modes: fr.modes, data: fr });
+    return fr;
+  });
   await nav.build(prog(0.68, 0.78), yieldFrame);
 
   // ---------------------------------------------------------------- 조회 함수
@@ -73,7 +80,7 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
       if (t === T.PIER && mode === 'boat') return pierEdge(x, y);
       return true;
     }
-    if (t === T.BRIDGE && mode === 'boat') return bu.has(i); // 다리 밑으로 배가 지나간다
+    if (t === T.BRIDGE && (mode === 'boat' || mode === 'swim')) return bu.has(i); // 다리 밑으로 배·헤엄이 지나간다
     return false;
   }
 
@@ -265,6 +272,7 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
       for (const b of st.queryBuildings(x - r - 1, y - r - 1, x + r + 1, y + r + 1, [])) if (st.underRoof(b, x, y, r)) return b;
       return null;
     },
+    ferries,
     gates: tr.gates,
     walls: tr.walls,
     rivers: tr.rivers,

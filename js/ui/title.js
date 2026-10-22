@@ -29,7 +29,8 @@ export function createTitle(ui, game) {
         h('h1', { class: 'jx-title-main' }, '조선', h('span', { class: 'jx-year', text: '1899' })),
         h('span', { class: 'jx-seal jx-title-seal', text: '光武', 'aria-hidden': 'true' })
       ),
-      h('p', { class: 'jx-title-sub', text: '광무 3년, 기찻길이 들어오던 해' })
+      // 좁은 화면에서는 두 줄(세로 두 단)로 나눈다
+      h('p', { class: 'jx-title-sub' }, h('span', { text: '광무 3년, ' }), h('span', { text: '기찻길이 들어오던 해' }))
     ),
     h(
       'nav',
@@ -38,7 +39,7 @@ export function createTitle(ui, game) {
       bCont,
       bHelp,
       note,
-      h('p', { class: 'jx-title-foot', text: 'WASD 걷기 · E 행동 · F 타기 · 마우스 조준과 사격 · Esc 메뉴' })
+      h('p', { class: 'jx-title-foot jx-keys-only', text: 'WASD 걷기 · E 행동 · F 타기 · 마우스 조준과 사격 · Esc 메뉴' })
     )
   );
 
@@ -102,9 +103,10 @@ export function createTitle(ui, game) {
       return;
     }
     ui.hideTitle();
-    // 불러온 뒤에 시작한다: 각 시스템 onStart 가 save.loaded 를 보고 새 게임 준비(첫 미션 등)를 건너뛸 수 있게
-    ui.loadGame();
+    // 시작한 뒤에 불러온다: 각 시스템 onStart 의 새 게임 준비를 deserialize 가 덮어쓴다.
+    // (onStart 가 남긴 미션 시작 배너 같은 잔여물은 index.js 가 'save:load' 때 지운다)
     game.beginPlay();
+    ui.loadGame(); // 못 불러오면 새 게임으로 이어진다 (알림은 save/ui 가 띄움)
   }
 
   function focusFirst() {

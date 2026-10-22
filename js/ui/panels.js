@@ -2,7 +2,7 @@
 // 좁은 화면(폭 < 640px)은 전체 화면. 상점·쉬어가기는 탭 없이 제목만.
 // 여기에는 틀과 쉬어가기·도움말·일지 화면이 있다. 소지품·제작·상점은 goods.js, 기술은 skillsview.js, 지도는 mapview.js.
 
-import { dirWord, distWord, emptyNote, formatMoney, h, safe, setAttr, setHidden, setText } from './dom.js';
+import { append, dirWord, distWord, emptyNote, formatMoney, h, safe, setAttr, setHidden, setText } from './dom.js';
 import { createCraftView, createInventoryView, createShopView } from './goods.js';
 import { createMapView } from './mapview.js';
 import { createSkillsView } from './skillsview.js';
@@ -98,6 +98,8 @@ export function createPanels(ui, game, hooks = {}) {
       console.warn(`[ui] 알 수 없는 패널: ${name}`);
       return false;
     }
+    // 처음 화면에서 연 도움말의 탭으로 소지품·지도 등을 열지 못하게 (ui.openPanel 과 같은 규칙)
+    if (hooks.canOpen && !hooks.canOpen(name)) return false;
     const was = current;
     if (was) {
       try {
@@ -117,8 +119,10 @@ export function createPanels(ui, game, hooks = {}) {
     setHidden(tabsNav, !tab);
     setHidden(titleEl, !!tab);
     for (const b of tabBtns) {
-      const on = b.getAttribute('data-id') === name;
+      const id = b.getAttribute('data-id');
+      const on = id === name;
       b.setAttribute('aria-selected', on ? 'true' : 'false');
+      setHidden(b, !on && !!hooks.canOpen && !hooks.canOpen(id));
     }
     if (tab) ctx.setTitle(tab.label);
     else ctx.setTitle(v.title || '', v.hanja || '');
@@ -250,6 +254,19 @@ function createPauseView(c) {
       setText(volOut, `${Math.round(v * 100)}`);
     },
   });
+  // 소리 끔/켬 (audio.muted, N 키와 같은 상태)
+  let lastMuted = false;
+  const bMute = h('button', {
+    class: 'jx-btn jx-mute',
+    type: 'button',
+    'aria-pressed': 'false',
+    onclick: () => {
+      const a = game.sys.audio;
+      if (!a || !('muted' in a)) return;
+      safe(() => (typeof a.toggleMute === 'function' ? a.toggleMute() : (a.muted = !a.muted)));
+      refresh();
+    },
+  });
   const links = h(
     'div',
     { class: 'jx-links' },
@@ -262,7 +279,7 @@ function createPauseView(c) {
     h(
       'div',
       { class: 'jx-side' },
-      h('div', { class: 'jx-field' }, h('label', { htmlFor: 'jx-volume' }, h('span', { text: '소리 크기' }), volOut), vol),
+      h('div', { class: 'jx-field' }, h('label', { htmlFor: 'jx-volume' }, h('span', { text: '소리 크기' }), volOut), h('div', { class: 'jx-vol-row' }, vol, bMute)),
       h('div', { class: 'jx-field' }, h('h3', { class: 'jx-sec-h', text: '바로 가기' }), links),
       status,
       h('p', { class: 'jx-muted', text: 'Esc 또는 P 를 누르면 돌아갑니다.' })
@@ -280,7 +297,14 @@ function createPauseView(c) {
     }
     const v = ui.getVolume();
     vol.value = String(Math.round(v * 100));
-    setText(volOut, `${Math.round(v * 100)}`);
+    const a = game.sys.audio;
+    const canMute = !!a && 'muted' in a;
+    const muted = canMute && !!a.muted;
+    lastMuted = !!a?.muted;
+    setHidden(bMute, !canMute);
+    setText(bMute, muted ? '소리 켜기' : '소리 끄기');
+    bMute.setAttribute('aria-pressed', muted ? 'true' : 'false');
+    setText(volOut, muted ? '꺼짐' : `${Math.round(v * 100)}`);
   }
 
   return {
@@ -293,6 +317,14 @@ function createPauseView(c) {
       refresh();
     },
     refresh,
+    frame() {
+      // N 키로 소리를 끄고 켜면 단추 글자도 따라 바꾼다
+      const m = !!game.sys.audio?.muted;
+      if (m !== lastMuted) {
+        lastMuted = m;
+        refresh();
+      }
+    },
   };
 }
 
@@ -413,7 +445,8 @@ function createJournalView(c) {
     }
     const sec = (title, hanja, items, kind) =>
       items.length ? h('section', { class: 'jx-sec' }, h('h3', { class: 'jx-sec-h' }, h('span', { text: title }), h('small', { text: hanja })), items.map((e) => entry(e, kind))) : null;
-    el.append(sec('진행 중인 이야기', '進行', act, 'act'));
+    // sec() 는 비면 null: 기본 Element.append(null) 은 'null' 글자를 붙이므로 dom.append 로 거른다
+    append(el, sec('진행 중인 이야기', '進行', act, 'act'));
     if (avs.length) {
       el.append(
         h(
@@ -433,8 +466,7 @@ function createJournalView(c) {
         )
       );
     }
-    el.append(sec('마친 이야기', '完了', done, 'done'));
-    el.append(sec('그르친 이야기', '失敗', fail, 'fail'));
+    append(el, [sec('마친 이야기', '完了', done, 'done'), sec('그르친 이야기', '失敗', fail, 'fail')]);
   }
 
   return { el, mount: refresh, refresh };

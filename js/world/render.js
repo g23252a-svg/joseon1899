@@ -7,7 +7,7 @@
 //  - 전체 지도 mapCanvas(0.5px/m, 지명 없음).
 
 import { T, T_COUNT, isWaterT, texAt } from './terrain.js';
-import { makeCanvas, drawBuildingGround, drawTreeShadows, drawCanopy, RoofRenderer } from './structures.js';
+import { makeCanvas, drawBuildingGround, drawTreeShadows, drawCanopy, CANOPY_STAGES, RoofRenderer, batcher } from './structures.js';
 import { PAL } from '../engine/palette.js';
 import { hexToRgb, mixHex, rgba, hash2 } from '../engine/util.js';
 
@@ -148,16 +148,32 @@ export class WorldRenderer {
     this.tiers = [
       { id: 0, cs: 64, res: 10, step: 0.4, jit: 1.5, edge: 0.9, max: 48, lod: 0, marg: 3 },
       { id: 1, cs: 128, res: 4, step: 0.8, jit: 2.0, edge: 1.4, max: 40, lod: 1, marg: 3 },
+      // 가까이 볼 때(고해상도 화면·확대): 32m 청크, 22px/m — 먹선이 또렷하게
+      { id: 2, cs: 32, res: 22, step: 0.4, jit: 1.5, edge: 0.9, max: 30, lod: 0, marg: 3 },
     ];
+    this.tierHi = 15; // 기기 px/m 이 이보다 크면 고해상도 청크
+    // 다른 단계 청크로 임시 표시할 때 고르는 순서
+    this.fallbackOrder = [[2, 1], [0], [0, 1]];
     this.tierSwitch = 6.5; // 기기 px/m 이 이보다 작으면 거친 청크
     this.cache = new Map(); // key → {canvas, tier, ci, cj}
     this.jobs = new Map(); // key → 그리는 중인 청크 작업
-    this.frameBudget = 4; // 프레임당 청크 만들기 시간(ms)
-    this.pool = [[], []];
+    this.frameBudget = 3; // 프레임당 땅 청크 만들기 시간(ms)
+    this.pool = this.tiers.map(() => []);
+    this._bufPool = this.tiers.map(() => []);
+    this._vw = new Float32Array(9); // 칸 다수결 임시표
+    this._vi = new Int32Array(9);
+    this._vk = new Int32Array(9);
+    this._vb = new Float32Array(9);
+    this._gEst = [2, 2, 1, 1, 0.5, 0]; // 청크 단계별 예상 시간(ms, 지수 평균)
+    this._cEst = [1.5, 1.5, 1.5, 1.5, 0.3, 0]; // 수관 단계별
     this.canopy = new Map(); // key → {canvas|null}
-    this.canopyPool = [];
-    this.CRES = 8; // 수관 캐시 px/m
-    this.canopyMax = 40;
+    this.canopyJobs = new Map(); // key → 그리는 중인 수관 작업
+    this.workBudget = 3.6; // 프레임당 만들기 작업(땅 청크·수관·지붕 캐시) 시간 예산(ms)
+    this._frameT0 = 0;
+    this.canopyPool = [[], []];
+    // 수관 캐시 단계: 보통 64m·8px/m, 가까이 볼 때 32m·20px/m
+    this.ctiers = [{ id: 0, cs: 64, res: 8, max: 32 }, { id: 1, cs: 32, res: 20, max: 26 }];
+    this.canopyMax = 32;
     this.buildMs = 0; // 최근 청크 하나 그리는 시간(ms)
     this.stats = { built: 0, canopyBuilt: 0, frameMs: 0 };
     this._seg = [];
@@ -219,7 +235,7 @@ export class WorldRenderer {
     set(T.MAIN_ROAD, mx(PAL.mainRoad, PAL.furrow, 0.18), mx(PAL.mainRoad, PAL.paperShade, 0.6), 0.45, 3, 8, 0.2);
     set(T.STREET, mx(PAL.street, PAL.furrow, 0.16), mx(PAL.street, PAL.paperShade, 0.6), 0.45, 3, 8, 0.2);
     set(T.YARD, mx(PAL.yard, PAL.paper, 0.15), mx(PAL.yard, PAL.dike, 0.3), 0.55, 4, 9, 0.2);
-    set(T.WALL, PAL.wallStone, PAL.wallTop, 0.3, 6, 10, 0.2);
+    set(T.WALL, mx(PAL.yard, PAL.paper, 0.15), mx(PAL.yard, PAL.dike, 0.3), 0.55, 4, 9, 0.2); // 성벽은 벡터로 덧그린다: 밑은 마당빛
     set(T.BRIDGE, mx(PAL.timber, PAL.paper, 0.45), PAL.timber, 0.2, 4, 11, 0);
     set(T.RAIL, mx(PAL.road, PAL.ink3, 0.45), mx(PAL.road, PAL.ink3, 0.6), 0.4, 8, 12, 0.2);
     set(T.PIER, mx(PAL.timber, PAL.paper, 0.4), PAL.timber, 0.2, 4, 13, 0);
@@ -331,7 +347,7 @@ export class WorldRenderer {
    * data(pw×ph RGBA) 에 (ox,oy) 부터 step(m) 간격 화소로 바탕을 칠한다 (j0..j1 행만).
    * jit: 경계 번짐 왜곡(m). 화소마다 무리 번호를 this._tb 에 남긴다 (edgePass 용).
    */
-  paintBase(data, pw, ph, ox, oy, step, jit, j0 = 0, j1 = ph) {
+  paintBase(data, pw, ph, ox, oy, step, jit, j0 = 0, j1 = ph, tb = null) {
     const tr = this.tr, g = tr.grid, C = tr.cols, R = tr.rows, cell = tr.cell, inv = 1 / cell, W = tr.w, H = tr.h;
     const cn = tr.cn, cl = tr.cl;
     const CB = this.CB, CA = this.CA, AMT = this.AMT, GRN = this.GRN, GRP = this.GRP, SHK = this.SHK;
@@ -368,8 +384,8 @@ export class WorldRenderer {
         }
       }
     }
-    if (!this._tb || this._tb.length < pw * ph) this._tb = new Uint8Array(pw * ph);
-    const TB = this._tb, JX = this.JX, JY = this.JY, WV = this.WV;
+    if (!tb && (!this._tb || this._tb.length < pw * ph)) this._tb = new Uint8Array(pw * ph);
+    const TB = tb || this._tb, JX = this.JX, JY = this.JY, WV = this.WV;
     for (let j = j0; j < j1; j++) {
       const y = oy + (j + 0.5) * step;
       const jr = ((j + pyo) & 255) << 8;
@@ -388,31 +404,40 @@ export class WorldRenderer {
           const cx = (sx * inv) | 0, cy = (sy * inv) | 0;
           ci = cy * C + cx;
           t = g[ci];
-          if (smooth) {
-            // 둘레 네 칸의 쌍선형 다수결: 칸 계단 대신 매끈한 경계
-            const fx = sx * inv - 0.5, fy = sy * inv - 0.5;
-            let bx = fx < 0 ? 0 : fx | 0, by = fy < 0 ? 0 : fy | 0;
-            if (bx > C - 2) bx = C - 2;
-            if (by > R - 2) by = R - 2;
-            const i00 = by * C + bx;
-            const a = g[i00], b = g[i00 + 1], c = g[i00 + C], d = g[i00 + C + 1];
-            if (a !== b || a !== c || a !== d) {
-              let tx = fx - bx, ty = fy - by;
-              tx = tx < 0 ? 0 : tx > 1 ? 1 : tx;
-              ty = ty < 0 ? 0 : ty > 1 ? 1 : ty;
-              const wa = (1 - tx) * (1 - ty), wb = tx * (1 - ty), wc = (1 - tx) * ty, wd = tx * ty;
-              let best = wa + (b === a ? wb : 0) + (c === a ? wc : 0) + (d === a ? wd : 0), bi = i00;
-              t = a;
-              if (b !== a) {
-                const v = wb + (c === b ? wc : 0) + (d === b ? wd : 0);
-                if (v > best) (best = v), (t = b), (bi = i00 + 1);
+          if (smooth && cx > 0 && cy > 0 && cx < C - 1 && cy < R - 1) {
+            // 둘레 3×3 칸의 2차 B-스플라인 가중 다수결: 칸 계단 대신 둥글고 매끈한 경계
+            const r0 = ci - C, r2 = ci + C;
+            if (g[r0 - 1] !== t || g[r0] !== t || g[r0 + 1] !== t || g[ci - 1] !== t || g[ci + 1] !== t || g[r2 - 1] !== t || g[r2] !== t || g[r2 + 1] !== t) {
+              const ux = sx * inv - cx - 0.5, uy = sy * inv - cy - 0.5; // -0.5..0.5
+              const ax0 = 0.5 * (0.5 - ux) * (0.5 - ux), ax1 = 0.75 - ux * ux, ax2 = 0.5 * (0.5 + ux) * (0.5 + ux);
+              const ay0 = 0.5 * (0.5 - uy) * (0.5 - uy), ay1 = 0.75 - uy * uy, ay2 = 0.5 * (0.5 + uy) * (0.5 + uy);
+              const VW = this._vw, VI = this._vi;
+              let nt = 0;
+              for (let dy = 0; dy < 3; dy++) {
+                const wy = dy === 0 ? ay0 : dy === 1 ? ay1 : ay2, row = ci + (dy - 1) * C;
+                for (let dx = 0; dx < 3; dx++) {
+                  const k = row + dx - 1, tt = g[k], w = wy * (dx === 0 ? ax0 : dx === 1 ? ax1 : ax2);
+                  let m = 0;
+                  while (m < nt && VI[m] !== tt) m++;
+                  if (m === nt) {
+                    VI[m] = tt;
+                    VW[m] = w;
+                    this._vk[m] = k;
+                    this._vb[m] = w;
+                    nt++;
+                  } else {
+                    VW[m] += w;
+                    if (w > this._vb[m]) (this._vb[m] = w), (this._vk[m] = k);
+                  }
+                }
               }
-              if (c !== a && c !== b) {
-                const v = wc + (d === c ? wd : 0);
-                if (v > best) (best = v), (t = c), (bi = i00 + C);
-              }
-              if (d !== a && d !== b && d !== c && wd > best) (t = d), (bi = i00 + C + 1);
-              ci = bi;
+              let best = -1;
+              for (let m = 0; m < nt; m++)
+                if (VW[m] > best) {
+                  best = VW[m];
+                  t = VI[m];
+                  ci = this._vk[m];
+                }
             }
           }
           if (t === T.BRIDGE) t = bu.has(ci) ? bu.get(ci) : T.ROAD;
@@ -496,8 +521,8 @@ export class WorldRenderer {
   }
 
   /** 물감 가장자리 진해짐: 화소 무리 번호가 e 화소 안에서 바뀌면 어둡게 (paintBase 뒤에) */
-  edgePass(data, pw, ph, e, j0 = 0, j1 = ph) {
-    const TB = this._tb;
+  edgePass(data, pw, ph, e, j0 = 0, j1 = ph, tb = null) {
+    const TB = tb || this._tb;
     if (!TB || e < 1) return;
     for (let j = j0; j < j1; j++) {
       const rU = (j - e < 0 ? 0 : j - e) * pw, rD = (j + e >= ph ? ph - 1 : j + e) * pw, r0 = j * pw;
@@ -583,11 +608,13 @@ export class WorldRenderer {
       if (!list.length) continue;
       ctx.lineWidth = w0 + ((w1 - w0) * b) / (B - 1);
       ctx.beginPath();
+      const bt = batcher(ctx, 'stroke', 48);
       for (const k of list) {
         ctx.moveTo(segs[k], segs[k + 1]);
         ctx.lineTo(segs[k + 2], segs[k + 3]);
+        bt.tick();
       }
-      ctx.stroke();
+      bt.done();
     }
   }
 
@@ -663,6 +690,7 @@ export class WorldRenderer {
     ctx.strokeStyle = rgba(inkW, 0.3);
     ctx.lineWidth = 0.08;
     ctx.beginPath();
+    const bs = batcher(ctx, 'stroke', 24);
     const tex = tr.tex;
     const R = 4.2;
     for (let gy = Math.floor((y0 - 2) / 2.6); gy <= Math.ceil((y1 + 2) / 2.6); gy++) {
@@ -677,13 +705,15 @@ export class WorldRenderer {
         const rr = 1.0 + hash2(gx, gy, 52) * 0.5;
         ctx.moveTo(xx - rr, yy);
         ctx.arc(xx, yy - rr * 0.55, rr * 1.12, Math.PI * 0.82, Math.PI * 0.18, true);
+        bs.tick();
       }
     }
-    ctx.stroke();
+    bs.done();
     // 강: 흐름 방향 붓선
     ctx.strokeStyle = rgba(inkW, 0.2);
     ctx.lineWidth = 0.07;
     ctx.beginPath();
+    const bf = batcher(ctx, 'stroke', 24);
     this.grid(x0 - 3, y0 - 3, x1 + 3, y1 + 3, 4.5, 61, (x, y, h) => {
       if (h > 0.42) return;
       if (tr.at(x, y) !== T.RIVER) return;
@@ -696,8 +726,9 @@ export class WorldRenderer {
       const bend = (hash2(Math.round(x), Math.round(y), 62) - 0.5) * 0.8;
       ctx.moveTo(x - ux * len * 0.5, y - uy * len * 0.5);
       ctx.quadraticCurveTo(x - uy * bend, y + ux * bend, x + ux * len * 0.5, y + uy * len * 0.5);
+      bf.tick();
     });
-    ctx.stroke();
+    bf.done();
   }
 
   // 갯벌 갯골·게 구멍, 모래 점묘
@@ -728,12 +759,44 @@ export class WorldRenderer {
         const mx = (out[k] + out[k + 2]) * 0.5, my = (out[k + 1] + out[k + 3]) * 0.5;
         if (tr.at(mx, my) === T.MUD) keep.push(out[k], out[k + 1], out[k + 2], out[k + 3]);
       }
-      this.strokeVar(ctx, keep, 0.05, 0.2, mixHex(PAL.seaDeep, PAL.ink2, 0.5), 0.45, 0.8);
+      // 갯골: 물이 고인 굽이진 골 (물빛 띠 + 가는 먹선), 잔 갯골은 더 가늘게
+      if (keep.length) {
+        this.strokeVar(ctx, keep, 0.7, 2.4, mixHex(PAL.shallow, PAL.sea, 0.45), 0.42, 0.22);
+        this.strokeVar(ctx, keep, 0.3, 1.1, mixHex(PAL.shallow, PAL.sea, 0.6), 0.5, 0.3);
+        this.strokeVar(ctx, keep, 0.05, 0.18, mixHex(PAL.seaDeep, PAL.ink2, 0.5), 0.5, 0.8);
+      }
+      const f2 = new Float32Array((nx + 1) * (ny + 1));
+      for (let j = 0; j <= ny; j++)
+        for (let i = 0; i <= nx; i++) f2[j * (nx + 1) + i] = fbmAtCheap(tr.tex, (gx0 + i) * sp * 1.4 + 57, (gy0 + j) * sp * 1.4 + 11);
+      const out2 = [], keep2 = [];
+      contour(f2, nx, ny, gx0 * sp, gy0 * sp, sp, 0.5, out2);
+      for (let k = 0; k < out2.length; k += 4) {
+        const mx = (out2[k] + out2[k + 2]) * 0.5, my = (out2[k + 1] + out2[k + 3]) * 0.5;
+        if (tr.at(mx, my) === T.MUD && texAt(tr.tex2, mx * 0.4, my * 0.4) > 0.3) keep2.push(out2[k], out2[k + 1], out2[k + 2], out2[k + 3]);
+      }
+      if (keep2.length) {
+        this.strokeVar(ctx, keep2, 0.15, 0.7, mixHex(PAL.shallow, PAL.mud, 0.3), 0.55, 0.6);
+        this.strokeVar(ctx, keep2, 0.03, 0.08, PAL.ink2, 0.3, 0.9, 0.4);
+      }
+      // 젖은 갯벌 윤기: 옅은 가로 붓질
+      ctx.strokeStyle = rgba(PAL.paper, 0.22);
+      ctx.lineWidth = 0.12;
+      ctx.beginPath();
+      const bw = batcher(ctx, 'stroke', 32);
+      this.grid(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 3.2, 73, (x, y, h) => {
+        if (h > 0.35 || tr.at(x, y) !== T.MUD) return;
+        const L = 0.8 + h * 4;
+        ctx.moveTo(x - L * 0.5, y);
+        ctx.quadraticCurveTo(x, y - 0.12, x + L * 0.5, y + 0.05);
+        bw.tick();
+      });
+      bw.done();
     }
     // 점묘
     const dot = lod ? 2.2 : 0.95;
     ctx.fillStyle = rgba(PAL.ink2, lod ? 0.18 : 0.22);
     ctx.beginPath();
+    const bd = batcher(ctx, 'fill', 32);
     this.grid(x0 - 1, y0 - 1, x1 + 1, y1 + 1, dot, 71, (x, y, h) => {
       const t = tr.at(x, y);
       if (t === T.MUD) {
@@ -741,14 +804,16 @@ export class WorldRenderer {
         const r = (lod ? 0.25 : 0.07) + h * 0.12;
         ctx.moveTo(x + r, y);
         ctx.arc(x, y, r, 0, TAU);
+        bd.tick();
       } else if (t === T.SAND) {
         if (h > 0.3) return;
         const r = (lod ? 0.18 : 0.045) + h * 0.06;
         ctx.moveTo(x + r, y);
         ctx.arc(x, y, r, 0, TAU);
+        bd.tick();
       }
     });
-    ctx.fill();
+    bd.done();
   }
 
   // 논둑 격자·모줄, 밭고랑
@@ -771,8 +836,9 @@ export class WorldRenderer {
       const inChunk = (x, y) => x >= x0 - 2 && x <= x1 + 2 && y >= y0 - 2 && y <= y1 + 2;
       const tex = tr.tex;
       // 둑의 물결 (선을 따라 천천히 휘어진다)
-      const wob = (s, k, amp) => (amp ? (texAt(tex, s * 0.32 + k * 13.7, k * 5.1 + f.seed) - 0.5) * amp : 0);
+      const wob = (s, k, amp) => (amp ? (texAt(tex, s * 0.55 + k * 13.7, k * 5.1 + f.seed) - 0.5 + (texAt(tex, s * 1.7 + k * 3.1, k * 9.3) - 0.5) * 0.35) * amp : 0);
       // along: 'v' 면 v 방향으로 걷는 선(u 고정), 'u' 면 반대. gapFn(s) 가 참이면 그 자리는 끊는다
+      let pen = ctx; // 선을 넣을 곳 (Path2D 면 옮겨 긋기 가능)
       const walk = (fixed, along, a0, a1, stepW, amp = 0, k = 0, gapFn = null) => {
         let open = false;
         for (let s = a0; s <= a1; s += stepW) {
@@ -781,8 +847,8 @@ export class WorldRenderer {
           const x = f.ox + u * ca - v * sa, y = f.oy + u * sa + v * ca;
           const ok = inChunk(x, y) && tr.at(x, y) === tt && !(gapFn && gapFn(s));
           if (ok) {
-            if (!open) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
+            if (!open) pen.moveTo(x, y);
+            else pen.lineTo(x, y);
             open = true;
           } else open = false;
         }
@@ -792,7 +858,7 @@ export class WorldRenderer {
         const kv0 = Math.floor(v0 / f.sv) - 1, kv1 = Math.ceil(v1 / f.sv) + 1;
         const uL = (k) => k * f.su + (hash2(k, 0, f.seed) - 0.5) * f.su * 0.35;
         const vL = (k) => k * f.sv + (hash2(0, k, f.seed + 1) - 0.5) * f.sv * 0.3;
-        const amp = lod ? 0 : 1.5;
+        const amp = lod ? 0 : 2.6;
         // 배미마다 물빛이 조금씩 다르다 (물 댄 논·자란 논)
         if (lod === 0) {
           const tints = [[PAL.paddyWater, 0.22], [mixHex(PAL.paddy, PAL.field, 0.45), 0.2], [PAL.treeLight, 0.14], [mixHex(PAL.paddyWater, PAL.sea, 0.3), 0.16]];
@@ -825,14 +891,32 @@ export class WorldRenderer {
         }
         // 논둑: 휘어지고, 군데군데 끊겨 배미가 합쳐진다
         ctx.beginPath();
+        const P2 = typeof Path2D !== 'undefined' ? new Path2D() : null;
+        if (P2) pen = P2;
         for (let k = ku0; k <= ku1; k++) walk(uL(k), 'v', v0, v1, 0.8, amp, k, (s) => hash2(k, Math.floor(s / f.sv), f.seed + 3) < 0.16);
         for (let k = kv0; k <= kv1; k++) walk(vL(k), 'u', u0, u1, 0.8, amp, k + 500, (s) => hash2(Math.floor(s / f.su), k, f.seed + 4) < 0.12);
-        ctx.strokeStyle = rgba(PAL.dike, 0.85);
-        ctx.lineWidth = lod ? 0.9 : 0.6;
-        ctx.stroke();
-        ctx.strokeStyle = rgba(PAL.ink2, lod ? 0.3 : 0.24);
-        ctx.lineWidth = lod ? 0.22 : 0.08;
-        ctx.stroke();
+        pen = ctx;
+        const strokeP = () => (P2 ? ctx.stroke(P2) : ctx.stroke());
+        ctx.strokeStyle = rgba(PAL.dike, 0.8);
+        ctx.lineWidth = lod ? 0.9 : 0.5;
+        strokeP();
+        if (lod) {
+          ctx.strokeStyle = rgba(PAL.ink2, 0.3);
+          ctx.lineWidth = 0.22;
+          strokeP();
+        } else {
+          // 둑의 그늘진 쪽 먹선 + 볕 드는 쪽 밝은 선 (같은 경로를 살짝 옮겨 긋는다)
+          ctx.save();
+          ctx.translate(0.09, 0.12);
+          ctx.strokeStyle = rgba(PAL.ink2, 0.3);
+          ctx.lineWidth = 0.09;
+          strokeP();
+          ctx.translate(-0.17, -0.22);
+          ctx.strokeStyle = rgba(PAL.paper, 0.4);
+          ctx.lineWidth = 0.08;
+          strokeP();
+          ctx.restore();
+        }
       } else {
         // 밭: 띠마다 고랑 방향이 다르다
         for (let k = Math.floor(u0 / f.su) - 1; k <= Math.ceil(u1 / f.su) + 1; k++) {
@@ -865,6 +949,7 @@ export class WorldRenderer {
     ctx.strokeStyle = rgba(mixHex(PAL.ink2, PAL.treeDark, 0.5), 0.36);
     ctx.lineWidth = 0.055;
     ctx.beginPath();
+    const bg = batcher(ctx, 'stroke', 10);
     const flowers = [];
     this.grid(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 2.7, 81, (x, y, h, gx, gy) => {
       if (h > 0.27) return;
@@ -879,8 +964,9 @@ export class WorldRenderer {
         ctx.lineTo(x + Math.cos(a) * L, y + Math.sin(a) * L);
       }
       if (h < 0.018) flowers.push(x + 0.3, y - 0.2, h);
+      bg.tick();
     });
-    ctx.stroke();
+    bg.done();
     for (let k = 0; k < flowers.length; k += 3) {
       ctx.fillStyle = flowers[k + 2] < 0.009 ? rgba(PAL.seal, 0.45) : rgba(PAL.white, 0.75);
       ctx.beginPath();
@@ -940,11 +1026,13 @@ export class WorldRenderer {
       ctx.strokeStyle = rgba(col, A[b]);
       ctx.lineWidth = (lod ? 0.22 : 0.07) + b * (lod ? 0.06 : 0.025);
       ctx.beginPath();
+      const bm = batcher(ctx, 'stroke', 32);
       for (let k = 0; k < L.length; k += 6) {
         ctx.moveTo(L[k], L[k + 1]);
         ctx.quadraticCurveTo(L[k + 2], L[k + 3], L[k + 4], L[k + 5]);
+        bm.tick();
       }
-      ctx.stroke();
+      bm.done();
     }
     // 태점 (산꼭대기 이끼점)
     if (dots.length) {
@@ -1024,7 +1112,7 @@ export class WorldRenderer {
       }
     }
     if (!rk.all) {
-      this.strokeVar(ctx, seg, lod ? 0.3 : 0.08, lod ? 0.65 : 0.4, PAL.ink, 0.75, 0.9, 0.18);
+      this.strokeVar(ctx, seg, lod ? 0.3 : 0.06, lod ? 0.65 : 0.34, PAL.ink, 0.62, 0.9, 0.24);
       if (lod === 0) this.strokeVar(ctx, seg, 0.05, 0.16, PAL.ink2, 0.35, 1.7, 0.5);
     }
   }
@@ -1081,21 +1169,25 @@ export class WorldRenderer {
         ctx.strokeStyle = rgba(PAL.furrow, 0.32);
         ctx.lineWidth = 0.09;
         ctx.beginPath();
+        const br = batcher(ctx, 'stroke', 48);
         for (let k = 0; k < ruts.length; k += 4) {
           ctx.moveTo(ruts[k], ruts[k + 1]);
           ctx.lineTo(ruts[k + 2], ruts[k + 3]);
+          br.tick();
         }
-        ctx.stroke();
+        br.done();
       }
       if (edges.length) {
         ctx.strokeStyle = rgba(sty.col, sty.a);
         ctx.lineWidth = lod ? sty.w * 2.6 : sty.w;
         ctx.beginPath();
+        const be = batcher(ctx, 'stroke', 48);
         for (let k = 0; k < edges.length; k += 4) {
           ctx.moveTo(edges[k], edges[k + 1]);
           ctx.lineTo(edges[k + 2], edges[k + 3]);
+          be.tick();
         }
-        ctx.stroke();
+        be.done();
       }
     }
   }
@@ -1248,11 +1340,13 @@ export class WorldRenderer {
         ctx.lineWidth = lod ? 0.4 : 0.24;
         ctx.lineCap = 'butt';
         ctx.beginPath();
+        const bs = batcher(ctx, 'stroke', 48);
         for (let k = 0; k < sl.length; k += 4) {
           ctx.moveTo(sl[k], sl[k + 1]);
           ctx.lineTo(sl[k + 2], sl[k + 3]);
+          bs.tick();
         }
-        ctx.stroke();
+        bs.done();
         ctx.lineCap = 'round';
       }
       if (rails.length) {
@@ -1439,6 +1533,15 @@ export class WorldRenderer {
   // ---------------------------------------------------------------- 청크
 
   /** 청크 만들기 작업 (여러 프레임에 나눠 단계별로 그린다) */
+  /** 청크 작업 하나가 쓰는 바탕 버퍼 (ImageData + 무리 번호) */
+  _jobBuf(tier) {
+    const pool = this._bufPool[tier.id];
+    if (pool.length) return pool.pop();
+    const sc = this.scratch[tier.id], n = sc.n;
+    const img = sc.ctx?.createImageData?.(n, n) || { width: n, height: n, data: new Uint8ClampedArray(n * n * 4) };
+    return { img, tb: new Uint8Array(n * n) };
+  }
+
   _newJob(tier, ci, cj) {
     return { tier, ci, cj, stage: 0, canvas: null, ms: 0 };
   }
@@ -1450,22 +1553,27 @@ export class WorldRenderer {
     const x0 = ci * cs, y0 = cj * cs, x1 = x0 + cs, y1 = y0 + cs;
     const px = Math.round(cs * res);
     if (job.stage === 0) {
+      // 바탕 물감 위쪽 절반 (작업마다 제 버퍼 — 다른 청크 작업과 섞여도 안전)
       const cv = this.pool[tier.id].pop() || makeCanvas(px, px);
       if (!cv) {
         job.failed = true;
         return true;
       }
       job.canvas = cv;
-      const ctx = cv.getContext('2d');
+      job.buf = this._jobBuf(tier);
+      const n = this.scratch[tier.id].n, m = tier.marg, step = tier.step;
+      this.paintBase(job.buf.img.data, n, n, x0 - m * step, y0 - m * step, step, tier.jit, 0, n >> 1, job.buf.tb);
+    } else if (job.stage === 1) {
+      const ctx = job.canvas.getContext('2d');
       const sc = this.scratch[tier.id];
-      const m = tier.marg, step = tier.step;
-      this.paintBase(sc.img.data, sc.n, sc.n, x0 - m * step, y0 - m * step, step, tier.jit);
-      this.edgePass(sc.img.data, sc.n, sc.n, Math.max(1, Math.round(tier.edge / step)));
+      const m = tier.marg, step = tier.step, n = sc.n, buf = job.buf;
+      this.paintBase(buf.img.data, n, n, x0 - m * step, y0 - m * step, step, tier.jit, n >> 1, n, buf.tb);
+      this.edgePass(buf.img.data, n, n, Math.max(1, Math.round(tier.edge / step)), 0, n, buf.tb);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
       if (sc.ctx && sc.cv) {
-        sc.ctx.putImageData(sc.img, 0, 0);
+        sc.ctx.putImageData(buf.img, 0, 0);
         ctx.imageSmoothingEnabled = true;
         if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
         const k = res * step;
@@ -1474,6 +1582,8 @@ export class WorldRenderer {
         ctx.fillStyle = PAL.grass;
         ctx.fillRect(0, 0, px, px);
       }
+      this._bufPool[tier.id].push(buf);
+      job.buf = null;
     } else {
       const ctx = job.canvas.getContext('2d');
       ctx.setTransform(res, 0, 0, res, -x0 * res, -y0 * res);
@@ -1481,12 +1591,12 @@ export class WorldRenderer {
       ctx.lineJoin = 'round';
       const lod = tier.lod;
       try {
-        if (job.stage === 1) {
+        if (job.stage === 2) {
           this.drawWater(ctx, x0, y0, x1, y1, lod);
           this.drawShore(ctx, x0, y0, x1, y1, lod);
           this.drawFields(ctx, x0, y0, x1, y1, lod);
           if (lod === 0) this.drawGrass(ctx, x0, y0, x1, y1);
-        } else if (job.stage === 2) {
+        } else if (job.stage === 3) {
           this.drawMountains(ctx, x0, y0, x1, y1, lod);
           this.drawRoads(ctx, x0, y0, x1, y1, lod);
           this.drawBridges(ctx, x0, y0, x1, y1, lod);
@@ -1505,9 +1615,11 @@ export class WorldRenderer {
       }
       ctx.setLineDash?.([]);
     }
+    const dms = now() - t0;
+    this._gEst[job.stage] = this._gEst[job.stage] * 0.8 + dms * 0.2;
     job.stage++;
-    job.ms += now() - t0;
-    if (job.stage >= 4) {
+    job.ms += dms;
+    if (job.stage >= 5) {
       this.buildMs = this.buildMs * 0.7 + job.ms * 0.3;
       this.stats.built++;
       return true;
@@ -1531,16 +1643,26 @@ export class WorldRenderer {
       const k = map.keys().next().value;
       const e = map.get(k);
       map.delete(k);
-      if (e?.canvas && pools) pools[e.tier ?? 0]?.push(e.canvas);
+      const pl = pools && pools[e?.tier ?? 0];
+      if (e?.canvas && pl && pl.length < 6) pl.push(e.canvas); // 웅덩이는 조금만 (나머지는 버려 메모리 반환)
     }
   }
 
   /** GROUND 층 */
   drawGround(ctx, game, view) {
     const fr0 = now();
+    this._frameT0 = fr0;
     const cam = game.camera;
     const zpx = (cam.zoom || 14) * (cam.dpr || 1);
-    const tier = zpx >= this.tierSwitch ? this.tiers[0] : this.tiers[1];
+    // 단계 고르기 (경계에서 깜박이지 않게 6% 여유)
+    let tid = this.curTier ?? -1;
+    const want = zpx >= this.tierHi ? 2 : zpx >= this.tierSwitch ? 0 : 1;
+    if (tid < 0) tid = want;
+    else if (want !== tid) {
+      const hi = this.tierHi, lo = this.tierSwitch;
+      if (want === 2 ? zpx >= hi * 1.06 : want === 1 ? zpx < lo * 0.94 : tid === 2 ? zpx < hi * 0.94 : zpx >= lo * 1.06) tid = want;
+    }
+    const tier = this.tiers[tid];
     this.curTier = tier.id;
     const cs = tier.cs, W = this.tr.w, H = this.tr.h;
     const ci0 = Math.max(0, Math.floor(view.x0 / cs)), ci1 = Math.min(Math.ceil(W / cs) - 1, Math.floor(view.x1 / cs));
@@ -1571,7 +1693,7 @@ export class WorldRenderer {
           job = this._newJob(tier, Math.floor(k / 4096) % 4096, k % 4096);
           this.jobs.set(k, job);
         }
-        while (steps === 0 || now() - fr0 < budget) {
+        while (steps === 0 || now() - fr0 + this._gEst[job.stage] * 0.7 < budget) {
           steps++;
           if (this._stepJob(job)) {
             this.jobs.delete(k);
@@ -1587,7 +1709,7 @@ export class WorldRenderer {
         if (e) ctx.drawImage(e.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
         else this.drawFallback(ctx, tier, ci, cj, eps);
       }
-    } else if (now() - fr0 < budget * 0.5) {
+    } else if (now() - fr0 < budget * 0.5 && this.workLeft() > 1.5) {
       // 여유가 있으면 이동 방향 앞쪽 청크를 한 단계씩 미리
       this.prefetch(tier, view, game, fr0 + budget * 0.6);
     }
@@ -1596,10 +1718,11 @@ export class WorldRenderer {
       for (const [k, j] of this.jobs) {
         if (this.jobs.size <= 8) break;
         if (j.canvas) this.pool[j.tier.id].push(j.canvas);
+        if (j.buf) this._bufPool[j.tier.id].push(j.buf);
         this.jobs.delete(k);
       }
     }
-    this._evict(this.cache, tier.max + this.tiers[1 - tier.id].max * 0.25, this.pool);
+    this._evict(this.cache, tier.max + 10, this.pool);
     this.stats.frameMs = now() - fr0;
   }
 
@@ -1634,22 +1757,31 @@ export class WorldRenderer {
         if (!job.failed) this.cache.set(best, { canvas: job.canvas, tier: tier.id, ci: job.ci, cj: job.cj });
         break;
       }
-    } while (now() < until);
+    } while (now() + this._gEst[job.stage] * 0.7 < until);
   }
 
   /** 아직 없는 청크: 전체 지도 확대 위에, 다른 단계 청크가 있으면 그 조각을 */
   drawFallback(ctx, tier, ci, cj, eps) {
     const cs = tier.cs, x0 = ci * cs, y0 = cj * cs;
-    const other = this.tiers[1 - tier.id];
-    const ocs = other.cs;
-    const parts = [];
-    let all = true;
-    for (let oj = Math.floor(y0 / ocs); oj <= Math.floor((y0 + cs - 0.01) / ocs); oj++)
-      for (let oi = Math.floor(x0 / ocs); oi <= Math.floor((x0 + cs - 0.01) / ocs); oi++) {
-        const e = this.cache.get(this._key(other.id, oi, oj));
-        if (e) parts.push([oi, oj, e]);
-        else all = false;
+    // 덮을 수 있는 다른 단계 청크 (좋은 단계 우선). 다 덮는 단계가 있으면 그것만
+    let parts = [], all = false;
+    for (const oid of this.fallbackOrder[tier.id] || []) {
+      const other = this.tiers[oid], ocs = other.cs;
+      const ps = [];
+      let full = true;
+      for (let oj = Math.floor(y0 / ocs); oj <= Math.floor((y0 + cs - 0.01) / ocs); oj++)
+        for (let oi = Math.floor(x0 / ocs); oi <= Math.floor((x0 + cs - 0.01) / ocs); oi++) {
+          const e = this.cache.get(this._key(other.id, oi, oj));
+          if (e) ps.push([oi, oj, e, other]);
+          else full = false;
+        }
+      if (full && ps.length) {
+        parts = ps;
+        all = true;
+        break;
       }
+      if (ps.length && !parts.length) parts = ps;
+    }
     if (!all) {
       const mc = this.mapCanvas;
       if (mc) {
@@ -1660,8 +1792,8 @@ export class WorldRenderer {
         ctx.fillRect(x0, y0, cs + eps, cs + eps);
       }
     }
-    const r = other.res;
-    for (const [oi, oj, e] of parts) {
+    for (const [oi, oj, e, other] of parts) {
+      const r = other.res, ocs = other.cs;
       const ax = Math.max(x0, oi * ocs), ay = Math.max(y0, oj * ocs);
       const bx = Math.min(x0 + cs, (oi + 1) * ocs), by = Math.min(y0 + cs, (oj + 1) * ocs);
       ctx.drawImage(e.canvas, (ax - oi * ocs) * r, (ay - oj * ocs) * r, (bx - ax) * r, (by - ay) * r, ax, ay, bx - ax + eps, by - ay + eps);
@@ -1740,59 +1872,127 @@ export class WorldRenderer {
 
   // ---------------------------------------------------------------- 수관 (HIGH)
 
-  buildCanopy(ci, cj) {
-    const st = this.st;
-    const list = st.treesInChunk(ci, cj);
-    if (!list || !list.length) return { canvas: null, tier: 0 };
-    const res = this.CRES, cs = st.tcell, px = Math.round(cs * res);
-    const cv = this.canopyPool.pop() || makeCanvas(px, px);
-    if (!cv) return { canvas: null, tier: 0 };
-    const ctx = cv.getContext('2d');
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, px, px);
-    ctx.setTransform(res, 0, 0, res, -ci * cs * res, -cj * cs * res);
+  /** 수관 청크 작업 한 단계 (CANOPY_STAGES 번에 나눠 그린다). 끝나면 true */
+  _stepCanopy(job) {
+    const st = this.st, ct = job.ct, res = ct.res, cs = ct.cs, px = Math.round(cs * res);
+    const ci = job.ci, cj = job.cj, x0 = ci * cs, y0 = cj * cs;
+    // 나무 목록은 64m 버킷 (작은 청크면 그 버킷을 테두리로 걸러 쓴다)
+    const ti = Math.floor(x0 / st.tcell), tj = Math.floor(y0 / st.tcell);
+    if (job.stage === 0 && !job.canvas) {
+      const list = st.treesInChunk(ti, tj);
+      if (!list || !list.length) {
+        job.empty = true;
+        return true;
+      }
+      const cv = this.canopyPool[ct.id].pop() || makeCanvas(px, px);
+      if (!cv) {
+        job.empty = true;
+        return true;
+      }
+      const c0 = cv.getContext('2d');
+      c0.setTransform(1, 0, 0, 1, 0, 0);
+      c0.clearRect(0, 0, px, px);
+      job.canvas = cv;
+    }
+    const ctx = job.canvas.getContext('2d');
+    ctx.setTransform(res, 0, 0, res, -x0 * res, -y0 * res);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    const t0 = now();
     try {
-      drawCanopy(ctx, st, ci, cj, ci * cs, cj * cs, (ci + 1) * cs, (cj + 1) * cs);
+      drawCanopy(ctx, st, ti, tj, x0, y0, x0 + cs, y0 + cs, job.stage);
     } catch (err) {
       console.error('[world canopy]', err);
+      job.stage = CANOPY_STAGES;
     }
-    this.stats.canopyBuilt++;
-    return { canvas: cv, tier: 0 };
+    if (job.stage < CANOPY_STAGES) this._cEst[job.stage] = this._cEst[job.stage] * 0.8 + (now() - t0) * 0.2;
+    job.stage++;
+    if (job.stage >= CANOPY_STAGES) {
+      this.stats.canopyBuilt++;
+      return true;
+    }
+    return false;
+  }
+
+  /** 한 번에 끝까지 (시험용). ctid: 수관 단계 번호 */
+  buildCanopy(ci, cj, ctid = 0) {
+    const job = { ct: this.ctiers[ctid], ci, cj, stage: 0, canvas: null, empty: false };
+    while (!this._stepCanopy(job));
+    return { canvas: job.empty ? null : job.canvas, ct: ctid };
+  }
+
+  /** 이번 프레임에 만들기 작업을 더 해도 되나 (땅·수관·지붕이 한 예산을 나눠 쓴다) */
+  workLeft() {
+    return this.workBudget - (now() - (this._frameT0 || 0));
   }
 
   drawCanopyLayer(ctx, game, view) {
     const st = this.st;
-    if (!st.trees || this.curTier !== 0) return; // 거친 단계는 땅 청크에 나무를 그렸다
-    const t0 = now();
-    const cs = st.tcell;
-    const ci0 = Math.max(0, Math.floor((view.x0 - 4) / cs)), ci1 = Math.min(st.tccols - 1, Math.floor((view.x1 + 4) / cs));
-    const cj0 = Math.max(0, Math.floor((view.y0 - 4) / cs)), cj1 = Math.min(st.tcrows - 1, Math.floor((view.y1 + 4) / cs));
+    if (!st.trees || this.curTier === 1) return; // 거친 단계는 땅 청크에 나무를 그렸다
+    const ct = this.ctiers[this.curTier === 2 ? 1 : 0];
+    const cs = ct.cs, W = this.tr.w, H = this.tr.h;
+    const ci0 = Math.max(0, Math.floor((view.x0 - 4) / cs)), ci1 = Math.min(Math.ceil(W / cs) - 1, Math.floor((view.x1 + 4) / cs));
+    const cj0 = Math.max(0, Math.floor((view.y0 - 4) / cs)), cj1 = Math.min(Math.ceil(H / cs) - 1, Math.floor((view.y1 + 4) / cs));
     const cam = game.camera;
     const eps = 0.8 / ((cam.zoom || 14) * (cam.dpr || 1));
     const items = [];
-    let built = 0;
+    const cx = cam.x, cy = cam.y;
+    const key = (ci, cj) => (ct.id * 4096 + cj) * 4096 + ci;
+    let pending = null, pd = Infinity, pci = 0, pcj = 0;
     for (let cj = cj0; cj <= cj1; cj++)
       for (let ci = ci0; ci <= ci1; ci++) {
-        const k = cj * 4096 + ci;
-        let e = this.canopy.get(k);
+        const k = key(ci, cj);
+        const e = this.canopy.get(k);
         if (e) {
           this.canopy.delete(k);
           this.canopy.set(k, e);
-        } else if (built < 2 && (built === 0 ? this.stats.frameMs < this.frameBudget : now() - t0 < 2)) {
-          e = this.buildCanopy(ci, cj);
-          built++;
-          this.canopy.set(k, e);
+        } else {
+          const d = Math.hypot((ci + 0.5) * cs - cx, (cj + 0.5) * cs - cy);
+          if (d < pd) {
+            pd = d;
+            pending = k;
+            pci = ci;
+            pcj = cj;
+          }
         }
-        items.push([ci, cj, e]);
+        items.push([ci, cj, k]);
       }
+    // 가장 가까운 빈 청크부터 단계 진행 (예산 안에서, 적어도 몇 프레임에 한 번은)
+    if (pending !== null) {
+      this._canopyStarve = (this._canopyStarve || 0) + 1;
+      let job = this.canopyJobs.get(pending);
+      if (!job) {
+        job = { ct, ci: pci, cj: pcj, stage: 0, canvas: null, empty: false };
+        this.canopyJobs.set(pending, job);
+      }
+      while (this.workLeft() > this._cEst[job.stage] * 0.7 || (this._canopyStarve > 4 && this.workLeft() > 0)) {
+        this._canopyStarve = 0;
+        if (this._stepCanopy(job)) {
+          this.canopyJobs.delete(pending);
+          this.canopy.set(pending, { canvas: job.empty ? null : job.canvas, ct: ct.id });
+          break;
+        }
+      }
+    }
+    if (this.canopyJobs.size > 6) {
+      for (const [k, j] of this.canopyJobs) {
+        if (this.canopyJobs.size <= 3) break;
+        if (j.canvas) this.canopyPool[j.ct.id].push(j.canvas);
+        this.canopyJobs.delete(k);
+      }
+    }
     const drawAll = (filter) => {
-      for (const [ci, cj, e] of items) {
+      for (const [ci, cj, k] of items) {
         if (filter && !filter(ci, cj)) continue;
+        const e = this.canopy.get(k);
         if (e) {
           if (e.canvas) ctx.drawImage(e.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
-        } else this.drawTreesSimple(ctx, ci * cs, cj * cs, (ci + 1) * cs, (cj + 1) * cs, false);
+        } else {
+          // 그리는 중인 작업이 물감 덩이까지 마쳤으면 그것을, 아니면 단순한 먹 덩이
+          const j = this.canopyJobs.get(k);
+          if (j && j.canvas && j.stage >= 2) ctx.drawImage(j.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
+          else this.drawTreesSimple(ctx, ci * cs, cj * cs, (ci + 1) * cs, (cj + 1) * cs, false);
+        }
       }
     };
     // 플레이어가 수관 아래면 둘레에 구멍
@@ -1829,16 +2029,17 @@ export class WorldRenderer {
       ctx.restore();
     }
     // 정리
-    while (this.canopy.size > this.canopyMax) {
+    while (this.canopy.size > ct.max) {
       const k = this.canopy.keys().next().value;
       const e = this.canopy.get(k);
       this.canopy.delete(k);
-      if (e?.canvas) this.canopyPool.push(e.canvas);
+      const pl = this.canopyPool[e?.ct ?? 0];
+      if (e?.canvas && pl.length < 4) pl.push(e.canvas);
     }
   }
 
   drawRoofs(ctx, game, view) {
-    this.roofs.draw(ctx, game, view);
+    this.roofs.draw(ctx, game, view, () => this.workLeft());
   }
 
   // ---------------------------------------------------------------- 전체 지도

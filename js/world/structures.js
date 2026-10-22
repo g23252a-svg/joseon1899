@@ -1,7 +1,7 @@
 // 건물·성벽·나무: 충돌 사각형(solids, 버킷 격자), 마을 집 절차 생성, 나무 목록,
 // 그리고 HIGH 층 지붕 그리기(건물마다 오프스크린 캐시) + 땅에 붙는 그림자·기단(청크 렌더러가 부른다).
 
-import { T, isSoftGround } from './terrain.js';
+import { T, isSoftGround, SegIndex } from './terrain.js';
 import { PAL } from '../engine/palette.js';
 import { mulberry32, mixHex, rgba, clamp, pointInPolygon } from '../engine/util.js';
 
@@ -33,6 +33,28 @@ function strHash(s) {
 let _s = 1;
 const srand = (seed) => (_s = (seed >>> 0) % 2147483646 || 1);
 const rnd = () => (_s = (_s * 16807) % 2147483647) / 2147483647;
+
+/**
+ * 작은 도형이 아주 많은 경로는 잘게 끊어 칠해야 빠르다 (겹친 하위 경로 수천 개를 한 번에 칠하면 래스터화가 급격히 느려진다).
+ * 도형 하나를 경로에 넣을 때마다 tick() 을 부른다. 끝나면 done().
+ */
+export function batcher(ctx, mode, every = 32) {
+  let n = 0;
+  const flush = () => {
+    if (mode === 'fill') ctx.fill();
+    else ctx.stroke();
+    ctx.beginPath();
+  };
+  return {
+    tick() {
+      if (++n % every === 0) flush();
+    },
+    done() {
+      flush();
+      n = 0;
+    },
+  };
+}
 
 /** 회전 사각형 둘이 겹치는가 (분리축) — a, b = {x,y,w,h,angle}, margin 은 a 를 키운다 */
 function obbOverlap(a, b, margin = 0) {
@@ -199,6 +221,23 @@ export class Structures {
   /** 문 위치: front 가 주어지면 그 쪽, 아니면 가장 가까운 길 쪽 면의 가운데 바깥 */
   doorOf(b) {
     const c = Math.cos(b.angle), s = Math.sin(b.angle);
+    if (b.kind === 'pier') {
+      // 잔교: 뭍에 닿은 끝 (양 끝 중 물이 아닌 쪽)
+      const long = b.w >= b.h, half = (long ? b.w : b.h) / 2;
+      let best = null;
+      for (const sd of [-1, 1]) {
+        const lx = long ? sd * (half + 1.5) : 0, ly = long ? 0 : sd * (half + 1.5);
+        const x = b.x + lx * c - ly * s, y = b.y + lx * s + ly * c;
+        const t = this.tr.at(x, y);
+        const dry = t !== T.SEA && t !== T.RIVER && t !== T.SHALLOW && t !== T.VOID;
+        const ix = b.x + (lx * (half - 1)) / (half + 1.5) * c - (ly * (half - 1)) / (half + 1.5) * s;
+        const iy = b.y + (lx * (half - 1)) / (half + 1.5) * s + (ly * (half - 1)) / (half + 1.5) * c;
+        const p = dry ? { x, y } : { x: ix, y: iy };
+        if (dry && !best?.dry) best = { ...p, dry };
+        else if (!best) best = { ...p, dry };
+      }
+      return { x: best.x, y: best.y };
+    }
     let side = b.front;
     if (!side) {
       const near = this.tr.roadIndex.nearest(b.x, b.y, 80);
@@ -236,7 +275,7 @@ export class Structures {
       const big = g.thickness >= 4;
       const W = g.w + g.thickness * 3 + (big ? 8 : 5);
       const H = g.thickness + (big ? 7 : 5);
-      const b = this.addBuilding({ id: 'gate_' + g.id, kind: 'gate', name: g.name, hanja: g.hanja, x: g.x, y: g.y, w: W, h: H, angle: g.angle, tags: ['gate', 'landmark'], noSolid: true, gate: g });
+      const b = this.addBuilding({ id: 'gate_' + g.id, kind: 'gate', name: g.name, hanja: g.hanja, x: g.x, y: g.y, w: W, h: H, angle: g.angle, tags: ['gate', 'landmark'], noSolid: true, gate: g, door: { x: g.x, y: g.y } });
       const L = W / 2 - b.eave - g.w / 2;
       if (L > 0.5) {
         const c = Math.cos(g.angle), s = Math.sin(g.angle);
@@ -252,9 +291,104 @@ export class Structures {
       if (b.kind === 'church') b.tower = true;
       this.paintYard(b, 2.5, 2.5);
     }
+    // 큰 고을(도성)은 골목을 먼저 낸다 → 집이 골목을 따라 빽빽이
+    for (const st of this.map.settlements || []) if (st.kind === 'city' || st.alleys) this.genAlleys(st);
     // 마을 집
     for (const st of this.map.settlements || []) this.placeSettlement(st);
     this.genTrees();
+  }
+
+  /** 골목: 큰길에서 곁가지로 휘며 뻗는 좁은 길 (지형에 STREET 로 칠하고 길 목록·색인에 넣는다) */
+  genAlleys(st) {
+    const tr = this.tr, rng = mulberry32((st.seed ?? strHash(st.id)) + 77);
+    const W = st.alleyWidth ?? 4;
+    const gap = st.alleyGap ?? 46;
+    const base = tr.roadIndex.query(st.x - st.r, st.y - st.r, st.x + st.r, st.y + st.r, []).filter((s) => s.road.kind !== 'path');
+    const alleys = [];
+    const okAt = (x, y) => {
+      if ((x - st.x) ** 2 + (y - st.y) ** 2 > st.r * st.r) return false;
+      const t = tr.at(x, y);
+      if (!(t === T.GRASS || t === T.YARD || t === T.FIELD || t === T.SAND || t === T.FOREST || (t === T.MOUNTAIN && tr.heightAt(x, y) < 0.33))) return false;
+      return !this.inRestricted(x, y);
+    };
+    const roadHit = (x, y) => {
+      const t = tr.at(x, y);
+      return t === T.ROAD || t === T.MAIN_ROAD || t === T.STREET || t === T.BRIDGE;
+    };
+    const mine = new SegIndex(24);
+    const walk = (sx, sy, ang, maxLen, depth) => {
+      const pts = [[sx, sy]];
+      let x = sx, y = sy, a = ang, len = 0, joined = false;
+      const step = 4;
+      while (len < maxLen) {
+        a += (rng() - 0.5) * 0.22;
+        const nx = x + Math.cos(a) * step, ny = y + Math.sin(a) * step;
+        if (len > 6 && roadHit(nx, ny)) {
+          pts.push([nx, ny]);
+          joined = true;
+          break;
+        }
+        if (!okAt(nx, ny)) break;
+        // 다른 골목에 너무 가까우면 거기 붙고 멈춘다
+        if (len > 10) {
+          const near = mine.nearest(nx, ny, W + 7);
+          if (near) {
+            pts.push([near.x, near.y]);
+            joined = true;
+            break;
+          }
+        }
+        x = nx;
+        y = ny;
+        len += step;
+        if (len % 12 < step) pts.push([x, y]);
+      }
+      if (!joined && (pts.length < 2 || pts[pts.length - 1][0] !== x)) pts.push([x, y]);
+      if (len < 14 && !joined) return;
+      // 짧은 마디는 줄여서
+      const al = { id: `${st.id}_al${alleys.length}`, kind: 'street', alley: true, width: W, points: pts };
+      alleys.push(al);
+      for (let i = 0; i + 1 < pts.length; i++) mine.add({ ax: pts[i][0], ay: pts[i][1], bx: pts[i + 1][0], by: pts[i + 1][1] }, 0);
+      // 곁가지
+      if (depth < 1) {
+        let d = 0;
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const ax = pts[i][0], ay = pts[i][1], bx = pts[i + 1][0], by = pts[i + 1][1];
+          const L = Math.hypot(bx - ax, by - ay);
+          d += L;
+          if (d < 26 || rng() > 0.5) continue;
+          d = 0;
+          const sd = rng() < 0.5 ? -1 : 1;
+          const ba = Math.atan2(by - ay, bx - ax) + sd * (Math.PI / 2 + (rng() - 0.5) * 0.5);
+          walk(bx + Math.cos(ba) * (W * 0.5 + 0.5), by + Math.sin(ba) * (W * 0.5 + 0.5), ba, 30 + rng() * 60, depth + 1);
+        }
+      }
+    };
+    for (const sg of base) {
+      const L = Math.hypot(sg.bx - sg.ax, sg.by - sg.ay);
+      if (L < 8) continue;
+      const ux = (sg.bx - sg.ax) / L, uy = (sg.by - sg.ay) / L;
+      for (const sd of [-1, 1]) {
+        for (let d = gap * (0.3 + rng() * 0.6); d < L - 4; d += gap * (0.75 + rng() * 0.5)) {
+          const px = sg.ax + ux * d, py = sg.ay + uy * d;
+          const off = sg.w / 2 + W * 0.5 + 0.3;
+          const nx = -uy * sd, ny = ux * sd;
+          const sx = px + nx * off, sy = py + ny * off;
+          if (!okAt(sx, sy) || mine.nearest(sx, sy, gap * 0.4)) continue;
+          walk(sx - nx * (W * 0.5), sy - ny * (W * 0.5), Math.atan2(ny, nx) + (rng() - 0.5) * 0.35, 50 + rng() * 110, 0);
+        }
+      }
+    }
+    for (const al of alleys) {
+      const info = { id: al.id, name: null, kind: 'street', alley: true, points: al.points, width: W, terrain: T.STREET };
+      tr.roads.push(info);
+      tr.stampLine(al.points, W / 2, 1, (i, t) => (t === T.GRASS || t === T.YARD || t === T.FIELD || t === T.SAND || t === T.FOREST || t === T.MOUNTAIN || t === T.PADDY ? T.STREET : -1), 0.25);
+      for (let s = 0; s + 1 < al.points.length; s++) {
+        const [ax, ay] = al.points[s], [bx, by] = al.points[s + 1];
+        tr.roadIndex.add({ ax, ay, bx, by, road: info, w: W }, W);
+      }
+    }
+    st._alleys = alleys.length;
   }
 
   /** 건물 둘레를 마당으로 칠한다 (부드러운 땅만) */
@@ -946,7 +1080,7 @@ export class RoofRenderer {
     this.st = st;
     this.cache = new Map(); // id → {tier, canvas, px}
     this.px = 0;
-    this.budgetPx = 14e6;
+    this.budgetPx = 8e6;
     this.perFrame = 8;
     this._vis = [];
   }
@@ -977,7 +1111,7 @@ export class RoofRenderer {
     drawRoof(ctx, b);
     return { tier, scale: t, canvas: cv, px: Math.ceil(w) * Math.ceil(h), rx0, ry0, rw: rx1 - rx0, rh: ry1 - ry0 };
   }
-  draw(ctx, game, view) {
+  draw(ctx, game, view, workLeft = null) {
     const st = this.st, cam = game.camera;
     const zpx = (cam.zoom || 14) * (cam.dpr || 1);
     let tier = ROOF_TIERS[ROOF_TIERS.length - 1];
@@ -998,7 +1132,7 @@ export class RoofRenderer {
     for (const b of vis) {
       let e = this.cache.get(b.id);
       if (!e || e.tier !== tier) {
-        if (made < this.perFrame && (made === 0 || now() - t0 < 2.5)) {
+        if (made < this.perFrame && (made === 0 || (workLeft ? workLeft() > 0 : now() - t0 < 2.5))) {
           const ne = this._entry(b, tier);
           made++;
           if (ne) {
@@ -1135,7 +1269,10 @@ export function drawTreeShadows(ctx, st, ci, cj, x0, y0, x1, y1) {
 }
 
 /** 나무 윗부분(수관) — 캔오피 청크에 일괄로 그린다. 번지는 물감 덩이 + 점엽(먹 점) + 솔잎 */
-export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
+/** 수관 그리기 단계 수 (청크 하나를 여러 프레임에 나눠 그린다) */
+export const CANOPY_STAGES = 5;
+
+export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1, stage = -1) {
   const list = st.treesInChunk(ci, cj);
   if (!list || !list.length) return 0;
   const tt = st.trees;
@@ -1152,7 +1289,7 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
   const lobes = (n, sc, seedOff) => {
     const x = tt[n], y = tt[n + 1], r = tt[n + 2], kind = tt[n + 3];
     srand(tt[n + 4] + seedOff);
-    const cnt = kind === 3 ? 7 : kind === 0 ? 5 : kind === 2 ? 3 : 5;
+    const cnt = kind === 3 ? 7 : kind === 0 ? 5 : kind === 2 ? 6 : 5;
     for (let b = 0; b < cnt; b++) {
       const a = rnd() * TAU, d = r * (0.12 + rnd() * 0.36), rr = r * sc * (0.38 + rnd() * 0.22) * (kind === 0 ? 0.92 : 1);
       const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
@@ -1170,16 +1307,22 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
   const pine = (k) => k === 0;
   const BROAD = mixHex(PAL.forest, PAL.treeDark, 0.3);
   const BROAD2 = mixHex(PAL.treeLight, PAL.forest, 0.5);
+  const all = stage < 0;
+  if (all || stage === 0) {
   // 1) 번짐 테두리 (옅고 넓게) → 2) 몸 물감 (두 가지 빛깔을 섞어서)
-  fillLobes(broad, BROAD, 0.22, 1.18);
+  fillLobes(broad, mixHex(BROAD, PAL.treeLight, 0.3), 0.15, 1.16);
   fillLobes((k, n) => k !== 0 && (tt[n + 4] & 1), BROAD, 0.62, 1, 0);
   fillLobes((k, n) => k !== 0 && !(tt[n + 4] & 1), BROAD2, 0.66, 1, 0);
+  }
+  if (all || stage === 1) {
   fillLobes(pine, PAL.pine, 0.24, 1.15, 5);
   fillLobes(pine, mixHex(PAL.pine, PAL.ink, 0.12), 0.74, 0.95, 5);
   // 3) 밝은 쪽(북서) 잎 몇 점
   ctx.fillStyle = rgba(mixHex(PAL.treeLight, PAL.paper, 0.25), 0.38);
   ctx.beginPath();
+  const bh = batcher(ctx, 'fill', 8);
   for (const n of idx) {
+    bh.tick();
     const kind = tt[n + 3];
     const x = tt[n], y = tt[n + 1], r = tt[n + 2];
     srand(tt[n + 4] + 23);
@@ -1191,27 +1334,40 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
       ctx.ellipse(bx, by, rr * 1.3, rr, rnd() - 0.5, 0, TAU);
     }
   }
-  ctx.fill();
+  bh.done();
   // 4) 버들: 늘어진 가지 붓선
-  ctx.strokeStyle = rgba(PAL.treeDark, 0.5);
-  ctx.lineWidth = 0.07;
-  ctx.beginPath();
-  for (const n of idx) {
-    if (tt[n + 3] !== 2) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 3);
-    for (let b = 0; b < 12; b++) {
-      const a = (b / 12) * TAU + rnd() * 0.4;
-      const ex = x + Math.cos(a) * r * 1.02, ey = y + Math.sin(a) * r * 1.02;
-      ctx.moveTo(x + Math.cos(a) * r * 0.2, y + Math.sin(a) * r * 0.2);
-      ctx.quadraticCurveTo(x + Math.cos(a + 0.4) * r * 0.7, y + Math.sin(a + 0.4) * r * 0.7 + 0.3, ex, ey + 0.4);
+  // 가지 끝에서 실처럼 흘러내리는 잔 붓선 (다발마다 같은 쪽으로 휘게)
+  for (const [col, al, lw, so] of [[mixHex(PAL.treeDark, PAL.ink, 0.2), 0.5, 0.055, 3], [mixHex(PAL.treeLight, PAL.paper, 0.15), 0.55, 0.05, 7]]) {
+    ctx.strokeStyle = rgba(col, al);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    for (const n of idx) {
+      if (tt[n + 3] !== 2) continue;
+      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+      srand(tt[n + 4] + so);
+      for (let c = 0; c < 7; c++) {
+        const a = rnd() * TAU, d = r * (0.25 + rnd() * 0.5);
+        const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
+        const bend = (rnd() - 0.5) * 0.8;
+        for (let b = 0; b < 6; b++) {
+          const sx = cx + (rnd() - 0.5) * r * 0.3, sy = cy + (rnd() - 0.5) * r * 0.3;
+          const L = r * (0.35 + rnd() * 0.3);
+          const ua = a + (rnd() - 0.5) * 0.5;
+          ctx.moveTo(sx, sy);
+          ctx.quadraticCurveTo(sx + Math.cos(ua) * L * 0.5 - Math.sin(ua) * bend, sy + Math.sin(ua) * L * 0.5 + Math.cos(ua) * bend + 0.15, sx + Math.cos(ua) * L, sy + Math.sin(ua) * L + 0.35);
+        }
+      }
     }
+    ctx.stroke();
   }
-  ctx.stroke();
+  }
+  if (all || stage === 2 || stage === 3) {
   // 5) 점엽: 가로로 누운 먹 점 (그늘 쪽·가장자리에 많이)
   for (const [al, dark] of [[0.3, false], [0.55, true]]) {
+    if (!all && stage !== (dark ? 3 : 2)) continue;
     ctx.fillStyle = rgba(dark ? PAL.ink : mixHex(PAL.ink, PAL.treeDark, 0.5), al);
     ctx.beginPath();
+    const bt = batcher(ctx, 'fill', 24);
     for (const n of idx) {
       const kind = tt[n + 3];
       if (kind === 0 || kind === 2) continue;
@@ -1226,18 +1382,27 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
         const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d;
         const rr = r * (0.055 + rnd() * 0.05);
         const rot = (rnd() - 0.5) * 0.7;
-        ctx.moveTo(dx + rr * 1.8 * Math.cos(rot), dy + rr * 1.8 * Math.sin(rot));
-        ctx.ellipse(dx, dy, rr * 1.8, rr * 0.8, rot, 0, TAU);
+        // 누운 붓 점 (작아서 마름모 넷 꼭짓점이면 충분 — 타원보다 훨씬 싸다)
+        const ca = Math.cos(rot), sa = Math.sin(rot), lx = rr * 1.9, ly = rr * 0.85;
+        ctx.moveTo(dx + ca * lx, dy + sa * lx);
+        ctx.lineTo(dx - sa * ly + ca * lx * 0.1, dy + ca * ly + sa * lx * 0.1);
+        ctx.lineTo(dx - ca * lx, dy - sa * lx);
+        ctx.lineTo(dx + sa * ly * 0.8, dy - ca * ly * 0.8);
+        ctx.closePath();
+        bt.tick();
       }
     }
-    ctx.fill();
+    bt.done();
   }
+  }
+  if (all || stage === 3) {
   // 6) 솔잎: 진한 먹 바늘 덩어리 (방사형 짧은 획)
   ctx.lineCap = 'round';
   for (const [al, w, sc, so] of [[0.4, 0.05, 1.05, 13], [0.68, 0.065, 0.8, 37]]) {
     ctx.strokeStyle = rgba(PAL.ink, al);
     ctx.lineWidth = w;
     ctx.beginPath();
+    const bt = batcher(ctx, 'stroke', 6);
     for (const n of idx) {
       if (tt[n + 3] !== 0) continue;
       const x = tt[n], y = tt[n + 1], r = tt[n + 2];
@@ -1253,18 +1418,23 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
           ctx.moveTo(cx + Math.cos(aa) * L * 0.2, cy + Math.sin(aa) * L * 0.2);
           ctx.lineTo(cx + Math.cos(aa) * L, cy + Math.sin(aa) * L);
         }
+        bt.tick();
       }
     }
-    ctx.stroke();
+    bt.done();
   }
+  }
+  if (all || stage === 4) {
   // 7) 활엽 외곽 먹선 일부 (남동쪽 호, 끊어지게)
   ctx.strokeStyle = rgba(PAL.ink, 0.3);
   ctx.lineWidth = 0.07;
   ctx.beginPath();
+  const bo = batcher(ctx, 'stroke', 16);
   for (const n of idx) {
     const kind = tt[n + 3];
     if (kind === 0 || kind === 2) continue;
     const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+    bo.tick();
     srand(tt[n + 4] + 17);
     for (let q = 0; q < 2; q++) {
       const a0 = -0.2 + q * 1.1 + rnd() * 0.4, a1 = a0 + 0.5 + rnd() * 0.5;
@@ -1273,7 +1443,7 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
       ctx.arc(x, y, rr, a0, a1);
     }
   }
-  ctx.stroke();
+  bo.done();
   // 8) 감나무 열매
   ctx.fillStyle = rgba(PAL.dusk, 0.85);
   ctx.beginPath();
@@ -1289,6 +1459,7 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1) {
     }
   }
   ctx.fill();
+  }
   return idx.length;
 }
 

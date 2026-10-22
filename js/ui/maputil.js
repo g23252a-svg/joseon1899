@@ -189,8 +189,9 @@ export function getLocalMap(game, cx, cy, radius, budgetMs = 1.5) {
   }
   const L = local, F = L.front;
   const moved = Math.max(Math.abs(cx - F.cx), Math.abs(cy - F.cy));
-  // 앞장이 지금 보이는 범위를 못 덮으면 바로 다 그린다
-  const covers = F.ok && F.R >= R && moved + radius <= F.R * 0.98;
+  // 앞장이 지금 보이는 범위를 못 덮을 때만 바로 다 그린다.
+  // (빨라져서 R 단계가 올라가도 앞장이 아직 보이는 범위를 덮으면 그대로 쓰고, 큰 장은 뒤에서 조금씩 그린다 — 프레임 끊김 방지)
+  const covers = F.ok && moved + radius <= F.R * 0.98;
   if (!covers) {
     L.job = null;
     beginSheet(F, cx, cy, R);
