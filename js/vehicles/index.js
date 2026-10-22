@@ -287,9 +287,9 @@ class Vehicles {
   waitOffer(a, game) {
     for (const [id, svc] of [['train', this.train?.mode !== 'none' && this.train], ['steamer', this.steamer]]) {
       const L = svc && game.world.lines[id];
-      const s = L?.stops.find((s) => Math.hypot((s.sx ?? s.x) - a.x, (s.sy ?? s.y) - a.y) < 25);
+      const s = L?.stops?.find?.((s) => Math.hypot((s.sx ?? s.x) - a.x, (s.sy ?? s.y) - a.y) < 25);
       if (!s) continue;
-      const busy = id === 'train' ? svc.c?.at === s.id && svc.c.state !== 'idle' : svc.boats.some((b) => b.sv.at === s.id && b.sv.state !== 'run');
+      const busy = id === 'train' ? svc.c?.at === s.id && svc.c.state !== 'idle' : (svc.boats || []).some((b) => b.sv?.at === s.id && b.sv?.state !== 'run');
       if (!busy) return { key: 'interact', label: `다음 ${id === 'train' ? '열차' : '증기선'}까지 기다리기`, priority: 1, d: 3, run: () => this.waitNext(id, s.id) };
     }
     return null;

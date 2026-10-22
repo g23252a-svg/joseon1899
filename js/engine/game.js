@@ -252,7 +252,7 @@ class Game {
       } catch (err) {
         console.error(`[entity ${e.kind} ${e.id} update]`, err);
         e._errors = (e._errors || 0) + 1;
-        if (e._errors > 30) e.alive = false;
+        if (e._errors > 30 && !e.isPlayer) e.alive = false;
       }
     }
 

@@ -3,6 +3,22 @@
 
 import { Human, makeLook } from './human.js';
 
+/** 상호작용 목록을 안전하게 받는다 (한 시스템의 버그가 플레이어를 멈추지 않게) */
+const _warned = new Set();
+function safeList(fn) {
+  try {
+    const r = fn();
+    return Array.isArray(r) ? r.filter(Boolean) : [];
+  } catch (err) {
+    const k = String(err?.message);
+    if (!_warned.has(k)) {
+      _warned.add(k);
+      console.error('[interaction provider]', err);
+    }
+    return [];
+  }
+}
+
 export class Player extends Human {
   constructor(opts = {}) {
     super({ role: 'player', faction: 'gang', name: opts.name || '주인공', hp: 100, look: makeLook('player'), ...opts });
@@ -53,14 +69,14 @@ export class Player extends Human {
         for (const e of near) {
           const d = e.interactDistance ? e.interactDistance(this) : Math.hypot(e.x - this.x, e.y - this.y) - (e.radius || 0);
           if (d > (e.interactRange ?? this.interactRange)) continue;
-          for (const it of e.getInteractions?.(this, game) || []) cands.push({ ...it, d, target: e });
+          for (const it of safeList(() => e.getInteractions?.(this, game))) cands.push({ ...it, d, target: e });
           for (const prov of game.interactionProviders) {
-            for (const it of prov(this, e, game) || []) cands.push({ ...it, d, target: e });
+            for (const it of safeList(() => prov(this, e, game))) cands.push({ ...it, d, target: e });
           }
         }
         // 엔티티가 아닌 장소 기반 상호작용 (상점 문, 나루 표지 등)
         for (const prov of game.interactionProviders) {
-          for (const it of prov(this, null, game) || []) cands.push({ ...it, d: it.d ?? 0.5, target: null });
+          for (const it of safeList(() => prov(this, null, game))) cands.push({ ...it, d: it.d ?? 0.5, target: null });
         }
         for (const it of cands) {
           const cur = prompt[it.key];
