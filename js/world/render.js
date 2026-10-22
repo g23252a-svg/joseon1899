@@ -8,10 +8,10 @@
 //  - HIGH: 나무 수관 청크 캐시(플레이어 주변은 구멍을 내어 비침) + 지붕(structures.RoofRenderer).
 //  - 전체 지도 mapCanvas(0.5px/m, 지명 없음).
 
-import { T, T_COUNT, isWaterT, texAt } from './terrain.js';
+import { T, T_COUNT, isWaterT, texAt, EDGE_BAND } from './terrain.js';
 import { makeCanvas, drawBuildingGround, drawTreeShadows, drawCanopy, CANOPY_STAGES, RoofRenderer, batcher } from './structures.js';
 import { PAL } from '../engine/palette.js';
-import { hexToRgb, mixHex, rgba, hash2 } from '../engine/util.js';
+import { hexToRgb, mixHex, rgba, hash2, polylineCumulative, pointAtDistance } from '../engine/util.js';
 
 const TAU = Math.PI * 2;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -226,7 +226,7 @@ export class WorldRenderer {
       this.SHK[t] = shk;
     };
     const mx = mixHex;
-    set(T.VOID, PAL.paperShade, PAL.paperDeep, 0.3, 4, 0, 0);
+    set(T.VOID, PAL.paper, PAL.paperDeep, 0.3, 4, 0, 0);
     set(T.SEA, PAL.sea, PAL.seaDeep, 0.25, 7, 1, 0);
     set(T.RIVER, PAL.river, PAL.sea, 0.25, 5, 1, 0);
     set(T.SHALLOW, PAL.shallow, mx(PAL.shallow, PAL.sand, 0.6), 0.45, 4, 1, 0);
@@ -246,6 +246,7 @@ export class WorldRenderer {
     set(T.BRIDGE, mx(PAL.timber, PAL.paper, 0.45), PAL.timber, 0.2, 4, 11, 0);
     set(T.RAIL, mx(PAL.road, PAL.ink3, 0.45), mx(PAL.road, PAL.ink3, 0.6), 0.4, 8, 12, 0.2);
     set(T.PIER, mx(PAL.timber, PAL.paper, 0.4), PAL.timber, 0.2, 4, 13, 0);
+    set(T.REED, PAL.reed, mx(PAL.reed, PAL.shallow, 0.5), 0.65, 5, 14, 0.15);
     this.paper = hexToRgb(PAL.paper);
     // 물 깊이 색띠 (64단)
     const ramp = (stops) => {
@@ -306,7 +307,35 @@ export class WorldRenderer {
     this.roads = tr.roads.map((r, n) => ({ ...r, n, bb: bb(r.points, r.width + 2) }));
     this.rails = (M.lines || [])
       .filter((l) => l.kind === 'rail')
-      .map((l) => ({ id: l.id, points: l.points, embedded: l.embedded ?? l.id === 'tram', bb: bb(l.points, 4) }));
+      .map((l) => ({ id: l.id, points: l.points, cum: polylineCumulative(l.points), gaps: null, embedded: l.embedded ?? l.id === 'tram', bb: bb(l.points, 4) }));
+    // 노선 부가 그림 (A.4): 전차 교행 측선, 가선과 가선주
+    this.poles = [];
+    this.wire = null;
+    for (const l of M.lines || []) {
+      if (l.kind !== 'rail' || l.id !== 'tram') continue;
+      const cum = polylineCumulative(l.points), L = cum[cum.length - 1];
+      const P = (d, o) => {
+        const p = pointAtDistance(l.points, Math.max(0, Math.min(L, d)), cum);
+        return [p.x + Math.sin(p.angle) * o, p.y - Math.cos(p.angle) * o]; // o > 0 = 진행 방향 왼쪽(북)
+      };
+      for (const sd of l.sidings || []) {
+        const d = typeof sd === 'number' ? sd : sd.d, h = 15, off = 2.6, ramp = 7;
+        const pts = [P(d - h - ramp, 0), P(d - h, off), P(d + h, off), P(d + h + ramp, 0)];
+        this.rails.push({ id: l.id + '_siding', points: pts, cum: polylineCumulative(pts), gaps: null, embedded: true, siding: true, bb: bb(pts, 4) });
+      }
+      const gap = l.catenary?.poleGap ?? 30;
+      for (let d = gap / 2; d < L; d += gap) {
+        const c = P(d, 0);
+        for (const o of [-4.2, 4.2]) {
+          const [px, py] = P(d, o), t = tr.at(px, py);
+          if (t === T.WALL || isWaterT(t) || this.st.solidNear(px, py, 0.4)) continue;
+          this.poles.push(px, py, c[0], c[1]);
+          break;
+        }
+      }
+      this.wire = { points: l.points, bb: bb(l.points, 6) };
+    }
+    this.platforms = (tr.platforms || []).map((p) => ({ ...p, bb: bb(p.poly, 1) }));
     this.fields = (M.fields || []).map((f, n) => {
       const poly = f.poly;
       let best = 0, ang = 0;
@@ -509,7 +538,20 @@ export class WorldRenderer {
             }
           }
         }
-        TB[q] = GRP[t];
+        // 지도 가장자리: 한지로 번져 사라진다 (A.1)
+        const de = Math.min(x, y, W - x, H - y);
+        let grp = GRP[t];
+        if (de < 100) {
+          let f = (de + (JX[ji] + JY[ji]) * 20 - 30) / 64;
+          if (f < 1) {
+            f = f <= 0 ? 0 : f * f * (3 - 2 * f);
+            r = PR + (r - PR) * f;
+            gg = PG + (gg - PG) * f;
+            b = PB + (b - PB) * f;
+            if (f < 0.3) grp = 0; // 다 바랜 곳은 물감 가장자리 진해짐도 없다
+          }
+        }
+        TB[q] = grp;
         // 종이 비침: 물감 농도
         const dens = 0.8 + (nL - 0.5) * 0.28 + (nM - 0.5) * 0.16;
         r = PR + (r - PR) * dens;
@@ -982,6 +1024,199 @@ export class WorldRenderer {
     }
   }
 
+  // 갈대밭: 바람에 기운 가는 줄기 묶음 + 이삭 (동남풍에 북서로 눕는다)
+  drawReeds(ctx, x0, y0, x1, y1, lod) {
+    const tr = this.tr;
+    let has = false;
+    for (let y = y0; y < y1 && !has; y += 4)
+      for (let x = x0; x < x1; x += 4)
+        if (tr.at(x, y) === T.REED) {
+          has = true;
+          break;
+        }
+    if (!has) return;
+    // 포기(덤불) 단위: 밑동에서 부채꼴로 뻗은 줄기 5~9개 + 끝의 이삭. 큰 얼룩으로 성긴 틈을 둬 바탕이 비친다
+    const step = lod ? 3.4 : 1.8, S = lod ? 1.5 : 1;
+    const stalks = [], tips = [], bases = [];
+    this.grid(x0 - 2, y0 - 2, x1 + 2, y1 + 2, step, 171, (x, y, h, gx, gy) => {
+      if (tr.at(x, y) !== T.REED) return;
+      const patch = hash2(gx >> 2, gy >> 2, 176);
+      if (h < 0.1 || (patch < 0.22 && h < 0.55)) return;
+      const n = lod ? 5 : 6 + ((h * 97) | 0) % 5;
+      const H = (1.25 + h * 0.95) * S, lean0 = -0.5 + (hash2(gx, gy, 175) - 0.5) * 0.3; // 동남풍에 북서로 눕는다
+      bases.push(x, y, H);
+      for (let k = 0; k < n; k++) {
+        const hk = hash2(gx * 7 + k, gy, 172);
+        const a = lean0 + (k - (n - 1) / 2) * 0.17 + (hk - 0.5) * 0.14;
+        const L = H * (0.65 + hk * 0.5);
+        const bx = x + (hk - 0.5) * 0.4 * S, by = y + (hash2(gx, gy * 5 + k, 173) - 0.5) * 0.2 * S;
+        const tx = bx + Math.sin(a) * L, ty = by - Math.cos(a) * L;
+        stalks.push(bx, by, bx + Math.sin(a * 0.55) * L * 0.55, by - Math.cos(a * 0.55) * L * 0.55, tx, ty);
+        if (hk > 0.28) tips.push(tx, ty, a, hk);
+      }
+    });
+    ctx.lineCap = 'round';
+    // 밑동 담채 그늘 (북서 빛 → 그림자는 남동)
+    ctx.fillStyle = rgba(mixHex(PAL.ink2, PAL.reed, 0.45), lod ? 0.16 : 0.13);
+    ctx.beginPath();
+    for (let k = 0; k < bases.length; k += 3) {
+      const r = bases[k + 2] * 0.5;
+      ctx.moveTo(bases[k] + 0.2 + r, bases[k + 1] + 0.12);
+      ctx.ellipse(bases[k] + 0.2, bases[k + 1] + 0.12, r, r * 0.42, 0, 0, TAU);
+    }
+    ctx.fill();
+    // 줄기: 중묵 가는 획
+    ctx.strokeStyle = rgba(mixHex(PAL.ink2, PAL.reed, 0.18), 0.62);
+    ctx.lineWidth = lod ? 0.14 : 0.045;
+    ctx.beginPath();
+    const bs = batcher(ctx, 'stroke', 48);
+    for (let k = 0; k < stalks.length; k += 6) {
+      ctx.moveTo(stalks[k], stalks[k + 1]);
+      ctx.quadraticCurveTo(stalks[k + 2], stalks[k + 3], stalks[k + 4], stalks[k + 5]);
+      bs.tick();
+    }
+    bs.done();
+    // 이삭: 자줏빛 도는 담채 번짐 위에 연한 깃털 붓점 (끝이 바람 쪽으로 처진다)
+    for (const [col, a, w, len] of [[mixHex(PAL.reed, '#8f7a6c', 0.6), 0.3, lod ? 0.42 : 0.2, 0.42], [mixHex(PAL.reed, PAL.paper, 0.5), 0.7, lod ? 0.2 : 0.075, 0.34]]) {
+      ctx.strokeStyle = rgba(col, a);
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      for (let k = 0; k < tips.length; k += 4) {
+        const an = tips[k + 2] - 0.35, l = len * S * (0.75 + tips[k + 3] * 0.4);
+        ctx.moveTo(tips[k], tips[k + 1]);
+        ctx.quadraticCurveTo(tips[k] + Math.sin(an) * l * 0.6, tips[k + 1] - Math.cos(an) * l * 0.6, tips[k] + Math.sin(an - 0.5) * l, tips[k + 1] - Math.cos(an - 0.5) * l * 0.8);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // 승강장: 돌 연석 띠 + 다진 흙 + 자갈 점
+  drawPlatforms(ctx, x0, y0, x1, y1, lod) {
+    for (const p of this.platforms) {
+      if (p.bb.x1 < x0 || p.bb.x0 > x1 || p.bb.y1 < y0 || p.bb.y0 > y1) continue;
+      ctx.beginPath();
+      p.poly.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+      ctx.closePath();
+      ctx.fillStyle = rgba(mixHex(PAL.wallStone, PAL.paper, 0.5), 0.9);
+      ctx.fill();
+      ctx.strokeStyle = rgba(PAL.ink3, 0.5);
+      ctx.lineWidth = lod ? 0.2 : 0.06;
+      ctx.stroke();
+      const edge = (pts, col, a, w) => {
+        ctx.strokeStyle = rgba(col, a);
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+        ctx.stroke();
+      };
+      edge(p.inner, PAL.wallStone, 1, 0.45);
+      edge(p.inner, PAL.ink, 0.75, lod ? 0.2 : 0.07);
+      if (lod) continue;
+      ctx.fillStyle = rgba(PAL.ink2, 0.25);
+      ctx.beginPath();
+      for (let k = 0; k < p.inner.length; k += 2) {
+        const a = p.inner[k], b = p.outer[k], t = 0.3 + hash2(k, 3, 177) * 0.6;
+        const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+        ctx.moveTo(x + 0.06, y);
+        ctx.arc(x, y, 0.06, 0, TAU);
+      }
+      ctx.fill();
+    }
+  }
+
+  /** 지도 가장자리 띠: 먹선까지 한지로 덮어 번지게 (청크·전체 지도 마무리) */
+  edgeVeil(ctx, x0, y0, x1, y1) {
+    const W = this.tr.w, H = this.tr.h, A = 30, B = 88;
+    if (x0 > B && y0 > B && x1 < W - B && y1 < H - B) return;
+    const side = (gx0, gy0, gx1, gy1, rx, ry, rw, rh) => {
+      if (rw <= 0 || rh <= 0) return;
+      const gr = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+      gr.addColorStop(0, rgba(PAL.paper, 1));
+      gr.addColorStop(0.4, rgba(PAL.paper, 0.7));
+      gr.addColorStop(1, rgba(PAL.paper, 0));
+      ctx.fillStyle = gr;
+      ctx.fillRect(rx, ry, rw, rh);
+    };
+    if (x0 < B) side(A, 0, B, 0, x0, y0, Math.min(x1, B) - x0, y1 - y0);
+    if (y0 < B) side(0, A, 0, B, x0, y0, x1 - x0, Math.min(y1, B) - y0);
+    if (x1 > W - B) side(W - A, 0, W - B, 0, Math.max(x0, W - B), y0, x1 - Math.max(x0, W - B), y1 - y0);
+    if (y1 > H - B) side(0, H - A, 0, H - B, x0, Math.max(y0, H - B), x1 - x0, y1 - Math.max(y0, H - B));
+    // 번진 얼룩 (경계가 곧은 띠로 보이지 않게)
+    ctx.fillStyle = rgba(PAL.paper, 0.45);
+    ctx.beginPath();
+    for (let s = Math.floor(Math.min(x0, y0) / 14) * 14 - 14; s < Math.max(x1, y1) + 14; s += 14) {
+      for (const [ex, ey] of [[s, 0], [0, s], [s, H], [W, s]]) {
+        const h = hash2(Math.round(ex), Math.round(ey), 181), r = 9 + h * 12, dIn = 34 + hash2(Math.round(ey), Math.round(ex), 182) * 22;
+        const x = ex === 0 ? dIn : ex === W ? W - dIn : ex, y = ey === 0 ? dIn : ey === H ? H - dIn : ey;
+        if (x + r < x0 || x - r > x1 || y + r < y0 || y - r > y1) continue;
+        ctx.moveTo(x + r, y);
+        ctx.ellipse(x, y, r, r * (0.6 + h * 0.4), h * 3, 0, TAU);
+      }
+    }
+    ctx.fill();
+  }
+
+  /** 전차 가선(직류 600V)과 가선주 (HIGH 층, 매 프레임 — 화면 안 것만) */
+  drawCatenary(ctx, game, view) {
+    const w = this.wire;
+    if (!w || w.bb.x1 < view.x0 || w.bb.x0 > view.x1 || w.bb.y1 < view.y0 || w.bb.y0 > view.y1) return;
+    const zoom = game.camera?.zoom || 14, P = this.poles;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = rgba(PAL.ink2, 0.7);
+    ctx.lineWidth = Math.max(0.05, 1 / zoom);
+    ctx.beginPath();
+    for (let k = 0; k < P.length; k += 4) {
+      if (P[k] < view.x0 - 6 || P[k] > view.x1 + 6 || P[k + 1] < view.y0 - 6 || P[k + 1] > view.y1 + 6) continue;
+      ctx.moveTo(P[k], P[k + 1]);
+      ctx.lineTo(P[k + 2], P[k + 3]);
+    }
+    ctx.stroke();
+    ctx.fillStyle = rgba(PAL.ink, 0.88);
+    for (let k = 0; k < P.length; k += 4) {
+      if (P[k] < view.x0 - 2 || P[k] > view.x1 + 2 || P[k + 1] < view.y0 - 2 || P[k + 1] > view.y1 + 2) continue;
+      ctx.fillRect(P[k] - 0.15, P[k + 1] - 0.15, 0.3, 0.3);
+    }
+    ctx.strokeStyle = rgba(PAL.ink, 0.5);
+    ctx.lineWidth = Math.max(0.035, 0.75 / zoom);
+    ctx.beginPath();
+    w.points.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+    ctx.stroke();
+  }
+
+  /** 지도 상태 변화로 바뀐 사각형의 땅 청크를 버린다 (다음 프레임에 화면 것은 바로 다시 그린다) */
+  invalidateRect(x0, y0, x1, y1) {
+    let hit = 0;
+    for (const map of [this.cache, this.jobs]) {
+      for (const [k, e] of map) {
+        const tier = typeof e.tier === 'number' ? this.tiers[e.tier] : e.tier;
+        if (!tier) continue;
+        const cs = tier.cs, ax = e.ci * cs, ay = e.cj * cs;
+        if (ax > x1 || ax + cs < x0 || ay > y1 || ay + cs < y0) continue;
+        map.delete(k);
+        hit++;
+        if (e.canvas && this.pool[tier.id].length < 6) this.pool[tier.id].push(e.canvas);
+      }
+    }
+    if (hit && this._lastCam) this._lastCam.x = NaN; // 도약처럼: 화면 것은 그 프레임에 동기로
+    return hit;
+  }
+
+  /** 철로 공사 구간: lineId 의 d 구간 목록(레일 없이 침목만) 또는 null */
+  setRailGaps(lineId, gaps) {
+    const ln = this.rails.find((r) => r.id === lineId);
+    if (!ln) return;
+    ln.gaps = gaps && gaps.length ? gaps : null;
+    const pts = ln.points, cum = ln.cum;
+    for (const [d0, d1] of gaps || ln._lastGaps || []) {
+      for (let s = 0; s + 1 < pts.length; s++) {
+        if (cum[s + 1] < d0 || cum[s] > d1) continue;
+        const a = pts[s], b = pts[s + 1];
+        this.invalidateRect(Math.min(a[0], b[0]) - 4, Math.min(a[1], b[1]) - 4, Math.max(a[0], b[0]) + 4, Math.max(a[1], b[1]) + 4);
+      }
+    }
+    ln._lastGaps = gaps;
+  }
+
   // 산: 준법 먹 획(기울기 방향), 태점, 바위 덩어리와 벼랑 먹선
   drawMountains(ctx, x0, y0, x1, y1, lod) {
     const tr = this.tr;
@@ -1324,7 +1559,7 @@ export class WorldRenderer {
       const pts = ln.points;
       const sl = [];
       const rails = [];
-      const g = ln.embedded ? 0.7 : 0.72;
+      const g = 1.435 / 2; // 궤간 1.435 m (A.4)
       for (let s = 0; s + 1 < pts.length; s++) {
         const ax = pts[s][0], ay = pts[s][1], bx = pts[s + 1][0], by = pts[s + 1][1];
         const cl = clipSeg(ax, ay, bx, by, x0 - 3, y0 - 3, x1 + 3, y1 + 3);
@@ -1333,9 +1568,25 @@ export class WorldRenderer {
         if (L < 0.01) continue;
         const ux = (bx - ax) / L, uy = (by - ay) / L, nx = -uy, ny = ux;
         const ra = cl[0] * L, rb = cl[1] * L;
-        for (const sd of [-1, 1]) rails.push(ax + ux * ra + nx * g * sd, ay + uy * ra + ny * g * sd, ax + ux * rb + nx * g * sd, ay + uy * rb + ny * g * sd);
+        // 공사 중 구간(gaps, 노선 d)은 침목만
+        let runs = [[ra, rb]];
+        if (ln.gaps) {
+          const s0 = ln.cum[s];
+          for (const [g0, g1] of ln.gaps) {
+            const a = g0 - s0, b = g1 - s0, next = [];
+            for (const [p, q] of runs) {
+              if (b <= p || a >= q) next.push([p, q]);
+              else {
+                if (a > p) next.push([p, a]);
+                if (b < q) next.push([b, q]);
+              }
+            }
+            runs = next;
+          }
+        }
+        for (const [p, q] of runs) for (const sd of [-1, 1]) rails.push(ax + ux * p + nx * g * sd, ay + uy * p + ny * g * sd, ax + ux * q + nx * g * sd, ay + uy * q + ny * g * sd);
         if (ln.embedded) continue;
-        const gap = lod ? 1.3 : 0.62;
+        const gap = lod ? 1.4 : 0.7; // 침목 2.4×0.25 m 를 0.7 m 마다 (A.4)
         for (let k = Math.max(0, Math.floor(ra / gap)); k * gap + gap * 0.5 <= rb; k++) {
           const d = k * gap + gap * 0.5;
           const px = ax + ux * d, py = ay + uy * d;
@@ -1344,7 +1595,7 @@ export class WorldRenderer {
       }
       if (sl.length) {
         ctx.strokeStyle = rgba(PAL.sleeper, 0.9);
-        ctx.lineWidth = lod ? 0.4 : 0.24;
+        ctx.lineWidth = lod ? 0.4 : 0.25;
         ctx.lineCap = 'butt';
         ctx.beginPath();
         const bs = batcher(ctx, 'stroke', 48);
@@ -1432,21 +1683,32 @@ export class WorldRenderer {
       const mx = (sg.ax + sg.bx) / 2 - c.x, my = (sg.ay + sg.by) / 2 - c.y;
       return mx * nx + my * ny > 0 ? 1 : -1;
     };
-    ctx.strokeStyle = rgba(PAL.wallTop, 0.95);
-    ctx.lineWidth = lod ? 1 : 0.7;
+    // 선 하나를 벽 중심에서 o 만큼 (바깥 +) 밀어 긋는다. pred 로 고른 벽만
+    const band = (pred, oFn, w, col, dash) => {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = w;
+      if (dash) ctx.setLineDash(dash);
+      ctx.beginPath();
+      for (const sg of vis) {
+        if (!pred(sg)) continue;
+        const L = Math.hypot(sg.bx - sg.ax, sg.by - sg.ay) || 1;
+        const ux = (sg.bx - sg.ax) / L, uy = (sg.by - sg.ay) / L, nx = -uy, ny = ux;
+        const o = oFn(sg) * outer(sg);
+        const ea = sg.cutA ? 0 : sg.thickness / 2, eb = sg.cutB ? 0 : sg.thickness / 2;
+        ctx.moveTo(sg.ax - ux * ea + nx * o, sg.ay - uy * ea + ny * o);
+        ctx.lineTo(sg.bx + ux * eb + nx * o, sg.by + uy * eb + ny * o);
+      }
+      ctx.stroke();
+      if (dash) ctx.setLineDash([]);
+    };
+    const city = (sg) => sg.thickness >= 4, palace = (sg) => sg.thickness < 4;
     ctx.lineCap = 'butt';
-    if (lod === 0) ctx.setLineDash([1.25, 0.32]);
-    ctx.beginPath();
-    for (const sg of vis) {
-      const L = Math.hypot(sg.bx - sg.ax, sg.by - sg.ay) || 1;
-      const ux = (sg.bx - sg.ax) / L, uy = (sg.by - sg.ay) / L, nx = -uy, ny = ux;
-      const o = (sg.thickness / 2 - 0.35) * outer(sg);
-      const ea = sg.cutA ? 0 : sg.thickness / 2, eb = sg.cutB ? 0 : sg.thickness / 2;
-      ctx.moveTo(sg.ax - ux * ea + nx * o, sg.ay - uy * ea + ny * o);
-      ctx.lineTo(sg.bx + ux * eb + nx * o, sg.by + uy * eb + ny * o);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
+    // 도성: 안쪽 그늘 1.5 m + 바깥쪽 여장 1.0×0.6 m 를 2.2 m 마다 (B.5)
+    band(city, (sg) => -(sg.thickness / 2 + 0.75), 1.5, 'rgba(38,34,28,0.1)');
+    band(city, (sg) => sg.thickness / 2 - 0.3, lod ? 0.9 : 0.6, rgba(PAL.wallTop, 0.95), lod ? null : [1.0, 1.2]);
+    // 궁장: 기와 얹은 담 (가운데 기와 갓 + 기왓골)
+    band(palace, () => 0, (lod ? 1.2 : 1) * 1.7, rgba(PAL.roofTile, 0.92));
+    if (lod === 0) band(palace, () => 0, 1.5, rgba(PAL.ink, 0.28), [0.06, 0.3]);
     ctx.lineCap = 'round';
     // 먹선: 바깥 굵게, 안쪽 가늘게
     for (const pass of [1, -1]) {
@@ -1614,18 +1876,21 @@ export class WorldRenderer {
           this.drawShore(ctx, x0, y0, x1, y1, lod);
           this.drawFields(ctx, x0, y0, x1, y1, lod);
           if (lod === 0) this.drawGrass(ctx, x0, y0, x1, y1);
+          this.drawReeds(ctx, x0, y0, x1, y1, lod);
         } else if (job.stage === 3) {
           this.drawMountains(ctx, x0, y0, x1, y1, lod);
           this.drawRoads(ctx, x0, y0, x1, y1, lod);
           this.drawBridges(ctx, x0, y0, x1, y1, lod);
           this.drawPiers(ctx, x0, y0, x1, y1, lod);
           this.drawRails(ctx, x0, y0, x1, y1, lod);
+          this.drawPlatforms(ctx, x0, y0, x1, y1, lod);
           this.drawWalls(ctx, x0, y0, x1, y1, lod);
         } else {
           drawBuildingGround(ctx, this.st, x0, y0, x1, y1);
           if (lod === 0) drawTreeShadows(ctx, this.st, ci, cj, x0, y0, x1, y1);
           else this.drawTreesSimple(ctx, x0, y0, x1, y1, true);
           ctx.setLineDash?.([]);
+          this.edgeVeil(ctx, x0, y0, x1, y1);
           this.overlayPaper(ctx, x0, y0, res, px);
         }
       } catch (err) {
@@ -2188,6 +2453,7 @@ export class WorldRenderer {
 
   drawRoofs(ctx, game, view) {
     const R = this.roofs, left = () => this.workLeft();
+    this.drawCatenary(ctx, game, view);
     // 착지할 화면의 지붕도 미리 (도약 프레임)
     if (this.landing && now() < this._syncUntil) R.prebuild(game, this.landing, left, 400);
     R.draw(ctx, game, view, left);
@@ -2318,6 +2584,7 @@ export class WorldRenderer {
       ctx.arc(g.x, g.y, g.thickness >= 4 ? 7 : 4.5, 0, TAU);
       ctx.fill();
     }
+    this.edgeVeil(ctx, 0, 0, tr.w, tr.h);
     // 한지 결
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (this.paperTex) {

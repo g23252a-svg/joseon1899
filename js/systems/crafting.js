@@ -41,8 +41,9 @@ class Crafting {
   fires() {
     if (this._fires) return this._fires;
     const w = this.game.world, out = [];
+    // 장소 id 끝이 _fire/_pot 이거나 이름에 모닥불·솥 (lm_fire_1899 같은 사고 현장은 빼고)
     for (const p of Object.values(w?.places || {})) {
-      const pot = /pot|솥/.test(p.id + p.name), fire = pot || /fire|모닥불/.test(p.id + p.name) || p.tags?.includes('fire');
+      const s = `${p.id} ${p.name || ''}`, pot = /_pot\b|솥/.test(s), fire = pot || /_fire\b|모닥불/.test(s) || p.tags?.includes('fire');
       if (fire) out.push({ x: p.x, y: p.y, r: 3.5, pot });
     }
     for (const b of w?.buildings || [])

@@ -1,7 +1,7 @@
 // 건물·성벽·나무: 충돌 사각형(solids, 버킷 격자), 마을 집 절차 생성, 나무 목록,
 // 그리고 HIGH 층 지붕 그리기(건물마다 오프스크린 캐시) + 땅에 붙는 그림자·기단(청크 렌더러가 부른다).
 
-import { T, isSoftGround, SegIndex } from './terrain.js';
+import { T, PASS, isSoftGround, SegIndex, inEdgeBand } from './terrain.js';
 import { PAL } from '../engine/palette.js';
 import { mulberry32, mixHex, rgba, clamp, pointInPolygon } from '../engine/util.js';
 
@@ -74,20 +74,23 @@ function proj(r, ux, uy, m) {
   return Math.abs((c * ux + s * uy) * (r.w / 2 + m)) + Math.abs((-s * ux + c * uy) * (r.h / 2 + m));
 }
 
+// 지붕 종류: 정한 것(b.roof) > 특수 건물 > 양식(style) > 건물 종류
+const STYLE_ROOF = { western: 'western', jp_wood: 'jp', cn_brick: 'cn', choga: 'thatch' };
+const KIND_ROOF = { palace: 'palace', gate: 'gate', altar: 'altar', gate_monument: 'arch', wreck: 'wreck', hut: 'hut', pier: 'none' };
 function roofOf(b) {
   if (b.roof) return b.roof;
+  if (KIND_ROOF[b.kind]) return KIND_ROOF[b.kind];
+  if (b.kind === 'pavilion') return b.style === 'jp_wood' ? 'jp' : 'pavilion';
+  if (STYLE_ROOF[b.style]) return STYLE_ROOF[b.style];
   switch (b.kind) {
-    case 'palace': return 'palace';
-    case 'gate': return 'gate';
-    case 'pavilion': return 'pavilion';
-    case 'church': case 'legation': case 'customs': case 'hotel': case 'station': case 'depot': case 'hospital': case 'warehouse': return 'western';
+    case 'church': case 'legation': case 'customs': case 'hotel': case 'station': case 'depot': return 'western';
     case 'jumak': case 'smithy': case 'stable': case 'camp_hall': return 'thatch';
-    case 'hut': return 'hut';
-    case 'pier': return 'none';
-    default: return b.style === 'western' ? 'western' : b.style === 'choga' ? 'thatch' : 'tile';
+    default: return 'tile';
   }
 }
-const EAVE = { tile: 0.9, palace: 1.4, gate: 1.2, pavilion: 0.9, thatch: 0.55, hut: 0.4, western: 0.45, none: 0 };
+const EAVE = { tile: 0.9, palace: 1.4, gate: 1.2, pavilion: 0.9, thatch: 0.55, hut: 0.4, western: 0.45, jp: 0.5, cn: 0.5, altar: 0, arch: 0, wreck: 0, none: 0 };
+// 땅에 기단·마루를 그리지 않는 것 (지붕 그림이 몸체 전부)
+const NO_BASE = { altar: 1, arch: 1, wreck: 1, none: 1 };
 
 // ---------------------------------------------------------------- 본체
 
@@ -107,6 +110,26 @@ export class Structures {
     this.treeChunks = null; // 64m 청크별 나무 번호 배열
     this.tcell = 64;
     this.restricted = (MAP.zones || []).filter((z) => z.kind === 'restricted');
+    // 미션·장소 자리는 마을 집이 덮지 않게 비워 둔다
+    this.keepClear = (MAP.places || []).filter((p) => p.kind !== 'city' && p.kind !== 'village' && p.kind !== 'district').map((p) => ({ x: p.x, y: p.y, r: Math.min(p.radius ?? 6, 6) + 2 }));
+  }
+
+  _unbucket(map, cell, x0, y0, x1, y1, obj) {
+    for (let cx = Math.floor(x0 / cell); cx <= Math.floor(x1 / cell); cx++)
+      for (let cy = Math.floor(y0 / cell); cy <= Math.floor(y1 / cell); cy++) {
+        const a = map.get(this._bkey(cx, cy));
+        const k = a ? a.indexOf(obj) : -1;
+        if (k >= 0) a.splice(k, 1);
+      }
+  }
+  /** 건물과 그 solids 를 뺀다 (지도 상태 변화용). 다시 넣을 때는 addBuilding(b) */
+  removeBuilding(b) {
+    if (!this.buildings.includes(b)) return false;
+    this.buildings = this.buildings.filter((o) => o !== b);
+    for (const s of this.solids) if (s.ref === b) this._unbucket(this.bucket, this.bcell, s.x0, s.y0, s.x1, s.y1, s);
+    this.solids = this.solids.filter((s) => s.ref !== b);
+    this._unbucket(this.bldBucket, this.bbcell, b.x - b._R, b.y - b._R, b.x + b._R, b.y + b._R, b);
+    return true;
   }
 
   // ---------------- solids
@@ -252,12 +275,25 @@ export class Structures {
     }
     const main = b.parts[0];
     const hw = main.w / 2 - b.eave, hh = main.h / 2 - b.eave;
-    let lx = main.x, ly = main.y;
-    if (side === 's') ly += hh + 0.6;
-    else if (side === 'n') ly -= hh + 0.6;
-    else if (side === 'e') lx += hw + 0.6;
-    else lx -= hw + 0.6;
-    return { x: b.x + lx * c - ly * s, y: b.y + lx * s + ly * c };
+    const at = (sd) => {
+      let lx = main.x, ly = main.y;
+      if (sd === 's') ly += hh + 0.6;
+      else if (sd === 'n') ly -= hh + 0.6;
+      else if (sd === 'e') lx += hw + 0.6;
+      else lx -= hw + 0.6;
+      return { x: b.x + lx * c - ly * s, y: b.y + lx * s + ly * c };
+    };
+    const p = at(side);
+    if (!b.named || PASS.foot[this.tr.at(p.x, p.y)]) return p;
+    // 문 앞이 물·바위면 걸을 수 있는 다른 면 (못 가운데 정자 등)
+    for (const sd of ['e', 'w', 's', 'n']) {
+      const q = at(sd);
+      if (PASS.foot[this.tr.at(q.x, q.y)]) {
+        b.front = sd;
+        return q;
+      }
+    }
+    return p;
   }
 
   // ---------------- 만들기
@@ -277,7 +313,9 @@ export class Structures {
       const big = g.thickness >= 4;
       const W = g.w + g.thickness * 3 + (big ? 8 : 5);
       const H = g.thickness + (big ? 7 : 5);
-      const b = this.addBuilding({ id: 'gate_' + g.id, kind: 'gate', name: g.name, hanja: g.hanja, x: g.x, y: g.y, w: W, h: H, angle: g.angle, tags: ['gate', 'landmark'], noSolid: true, gate: g, door: { x: g.x, y: g.y } });
+      const b = this.addBuilding({ id: 'gate_' + g.id, kind: 'gate', name: g.name, hanja: g.hanja, x: g.x, y: g.y, w: W, h: H, angle: g.angle, tags: ['gate', 'landmark'], noSolid: true, gate: g, locked: g.locked, door: { x: g.x, y: g.y } });
+      // 잠긴 문(숙정문): 문짝이 길을 막는다
+      if (g.locked) this.addSolid({ x: g.x, y: g.y, w: g.w + 0.4, h: g.thickness, angle: g.angle, kind: 'gate', ref: b, locked: true });
       const L = W / 2 - b.eave - g.w / 2;
       if (L > 0.5) {
         const c = Math.cos(g.angle), s = Math.sin(g.angle);
@@ -421,6 +459,8 @@ export class Structures {
   /** 후보 건물이 놓일 수 있는가: 지형·다른 solid·금지 구역 */
   canPlace(b, margin) {
     const tr = this.tr, c = Math.cos(b.angle), s = Math.sin(b.angle);
+    const br = Math.max(b.w, b.h) / 2;
+    for (const k of this.keepClear) if ((b.x - k.x) ** 2 + (b.y - k.y) ** 2 < (k.r + br) ** 2) return false;
     for (const p of b.parts) {
       const hw = p.w / 2 + margin, hh = p.h / 2 + margin;
       for (let ly = -hh; ly <= hh + 0.01; ly += Math.min(1.6, hh)) {
@@ -451,8 +491,16 @@ export class Structures {
     else if (style === 'hanok') roof = r < 0.8 ? 'tile' : 'thatch';
     else if (style === 'choga') roof = r < 0.88 ? 'thatch' : 'tile';
     else if (style === 'camp') roof = 'hut';
+    else if (style === 'jp_wood') roof = r < 0.88 ? 'jp' : 'tile';
+    else if (style === 'cn_brick') roof = r < 0.9 ? 'cn' : 'tile';
     else roof = r < (city ? 0.55 : 0.4) ? 'tile' : 'thatch';
     const q = rng();
+    if (roof === 'jp' || roof === 'cn') {
+      // 일본식: 길에 면한 좁고 깊은 2층 상가 / 청국식: 벽돌 집 + 곁채
+      const W = roof === 'jp' ? 6 + rng() * 3 : 8 + rng() * 3.5, H = roof === 'jp' ? 7 + rng() * 3 : 6 + rng() * 2;
+      if (q < 0.3) return { roof, parts: [{ x: 0, y: 0, w: W, h: H }, { x: (rng() < 0.5 ? -1 : 1) * (W / 2 - 2), y: -H / 2 - 1.8, w: 4, h: 3.6 }] };
+      return { roof, parts: [{ x: 0, y: 0, w: W, h: H }] };
+    }
     if (roof === 'thatch' || roof === 'hut') {
       const W = roof === 'hut' ? 4.5 + rng() * 2 : 7 + rng() * 2.6, H = roof === 'hut' ? 3.6 + rng() : 4.6 + rng() * 1.1;
       if (roof === 'thatch' && q < 0.22) {
@@ -479,7 +527,7 @@ export class Structures {
     const tr = this.tr;
     const rng = mulberry32(st.seed ?? strHash(st.id));
     const target = st.houses ?? 10;
-    const city = st.kind === 'city';
+    const city = st.kind === 'city' || (st.kind === 'town' && !!st.alleys); // 성안 골목 마을은 빽빽이
     const style = st.kind === 'camp' ? 'camp' : st.style || 'choga';
     let placed = 0;
     const segs = tr.roadIndex.query(st.x - st.r, st.y - st.r, st.x + st.r, st.y + st.r, []);
@@ -557,7 +605,17 @@ export class Structures {
     const tr = this.tr, M = this.map, forests = M.forests || [];
     const rng = mulberry32(4242);
     const list = [];
-    const push = (x, y, r, kind) => list.push(x, y, r, kind, (rng() * 16777215) | 0); // 씨앗은 Float32 에 정확히 들어가는 24비트
+    // 철로 둘레(깎은 길)와 미션·장소 자리에는 수관이 덮지 않게
+    const railIx = new SegIndex(48);
+    for (const ln of M.lines || []) if (ln.kind === 'rail') for (let s = 0; s + 1 < ln.points.length; s++) railIx.add({ ax: ln.points[s][0], ay: ln.points[s][1], bx: ln.points[s + 1][0], by: ln.points[s + 1][1] }, 8);
+    const clear = this.keepClear;
+    const push = (x, y, r, kind) => {
+      if (Math.min(x, y, tr.w - x, tr.h - y) < 52) return; // 가장자리 띠
+      const n = railIx.nearest(x, y, r + 4);
+      if (n && n.dist < r * 0.75 + 2.6) return;
+      for (const k of clear) if ((x - k.x) ** 2 + (y - k.y) ** 2 < (k.r + r * 0.6) ** 2) return;
+      list.push(x, y, r, kind, (rng() * 16777215) | 0); // 씨앗은 Float32 에 정확히 들어가는 24비트
+    };
     const S = 4.6;
     const C = tr.cols;
     for (let gy = 0; gy * S < tr.h; gy++)
@@ -567,6 +625,9 @@ export class Structures {
         if (i < 0) continue;
         const t = tr.grid[i];
         if (t !== T.FOREST && t !== T.MOUNTAIN && t !== T.GRASS) continue;
+        // 지도 가장자리 띠: 종이로 번지기 전에 성기게 사라진다
+        const de = Math.min(x, y, tr.w - x, tr.h - y);
+        if (de < 80 && de < 44 + (tr.cn[i] / 255) * 40) continue;
         const fi = tr.forestIdx[i];
         const f = fi ? forests[fi - 1] : null;
         let p;
@@ -672,7 +733,32 @@ const ROOF_TIERS = [5, 10, 18, 30];
 /** 지붕 하나를 로컬 좌표(1 = 1m, 중심 0,0)로 그린다 */
 export function drawRoof(ctx, b) {
   srand(b.seed);
+  if (!b.frame) return drawRoofBody(ctx, b);
+  // 공사 중(골조): 지붕은 알파 0.4, 서까래·기둥이 드러난다 (A.6)
+  ctx.globalAlpha = 0.4;
+  drawRoofBody(ctx, b);
+  ctx.globalAlpha = 1;
+  for (const p of b.parts) drawFrame(ctx, p);
+}
+
+function drawRoofBody(ctx, b) {
   switch (b.roof) {
+    case 'jp':
+      for (const p of b.parts) gableRoof(ctx, p, b, false);
+      if (b.parts[0]) signBoard(ctx, b);
+      break;
+    case 'cn':
+      for (const p of b.parts) gableRoof(ctx, p, b, true);
+      break;
+    case 'altar':
+      altarTop(ctx, b);
+      break;
+    case 'arch':
+      archTop(ctx, b);
+      break;
+    case 'wreck':
+      wreckTop(ctx, b);
+      break;
     case 'tile':
       for (const p of b.parts) hipRoof(ctx, p, tileStyle(b), b);
       break;
@@ -799,11 +885,12 @@ function hipRoof(ctx, p, st, b) {
   }
   // 단청 점 (처마 밑 끝선)
   if (st.dancheong) {
-    for (let x = -hw; x <= hw; x += 0.55) {
-      const yy = hh - sag * (1 - (x / hw) ** 2) * 0.5 + f * (x / hw) ** 2;
-      ctx.fillStyle = Math.round(x / 0.55) % 2 ? rgba(PAL.dancheongGreen, 0.85) : rgba(PAL.seal, 0.8);
-      ctx.fillRect(x - 0.1, yy + 0.18, 0.2, 0.16);
-      ctx.fillRect(x - 0.1, -yy - 0.34, 0.2, 0.16);
+    // 처마 안쪽 단청 띠: 녹·적 0.6 m 씩 번갈아 (B.5)
+    for (let k = 0, x = -hw; x < hw - 0.05; x += 0.6, k++) {
+      const xm = x + 0.3, yy = hh - sag * (1 - (xm / hw) ** 2) * 0.5 + f * (xm / hw) ** 2;
+      ctx.fillStyle = k & 1 ? rgba(PAL.dancheongGreen, 0.8) : rgba(PAL.seal, 0.72);
+      ctx.fillRect(x, yy + 0.16, 0.6, 0.15);
+      ctx.fillRect(x, -yy - 0.31, 0.6, 0.15);
     }
   }
   // 추녀마루 (모서리로 내려가는 마루)
@@ -1197,9 +1284,306 @@ function churchTower(ctx, b) {
   ctx.restore();
 }
 
+/** 지붕 로컬 좌표의 빛 방향 y 성분 (+ 면 = 빛 쪽이면 음수) */
+function lightLy(b, long) {
+  const th = (b.angle || 0) + (long ? 0 : Math.PI / 2);
+  return -LIGHT_X * Math.sin(th) + LIGHT_Y * Math.cos(th);
+}
+
+/** 맞배지붕: 일본식(직선 박공, 곡선 없는 처마, jpRoof) / 청국식(회색, 용마루 끝 갈고리, 처마 붉은 등) */
+function gableRoof(ctx, p, b, cn) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  const long = p.w >= p.h;
+  if (!long) ctx.rotate(Math.PI / 2);
+  const W = long ? p.w : p.h, H = long ? p.h : p.w, hw = W / 2, hh = H / 2;
+  const base = cn ? mixHex(PAL.cnBrick, '#55534f', rnd() * 0.45) : mixHex(PAL.jpRoof, '#5b6266', rnd() * 0.5);
+  const lit = mixHex(base, '#dcdfd8', cn ? 0.17 : 0.13), shd = mixHex(base, PAL.ink, 0.15);
+  const topLit = lightLy(b, long) < 0;
+  ctx.fillStyle = 'rgba(20,20,20,0.24)';
+  ctx.fillRect(-hw + 0.18, -hh + 0.26, W, H);
+  // 담채: 먹선보다 조금 어긋나게 번진 바탕
+  ctx.fillStyle = rgba(base, 0.3);
+  ctx.fillRect(-hw - 0.22, -hh - 0.16, W + 0.3, H + 0.26);
+  ctx.fillStyle = topLit ? lit : shd;
+  ctx.fillRect(-hw, -hh, W, hh);
+  ctx.fillStyle = topLit ? shd : lit;
+  ctx.fillRect(-hw, 0, W, hh);
+  // 기왓골: 청국식은 골이 깊고 성기게, 일본식은 촘촘하고 옅게 (용마루에서 처마로 곧게)
+  ctx.strokeStyle = rgba(PAL.ink, cn ? 0.3 : 0.2);
+  ctx.lineWidth = cn ? 0.05 : 0.04;
+  ctx.beginPath();
+  for (let x = -hw + 0.2, dx = cn ? 0.42 : 0.3; x < hw - 0.05; x += dx) {
+    ctx.moveTo(x, -hh + 0.05);
+    ctx.lineTo(x, hh - 0.05);
+  }
+  ctx.stroke();
+  // 박공 끝 판재 + 외곽 (곧은 선, 붓끝 흔들림 ±0.05)
+  ctx.strokeStyle = rgba(PAL.ink, 0.85);
+  ctx.lineWidth = 0.09;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  const jt = () => (rnd() - 0.5) * 0.1;
+  ctx.moveTo(-hw + jt(), -hh + jt());
+  ctx.lineTo(hw + jt(), -hh + jt());
+  ctx.lineTo(hw + jt(), hh + jt());
+  ctx.lineTo(-hw + jt(), hh + jt());
+  ctx.closePath();
+  ctx.stroke();
+  ctx.lineWidth = 0.16;
+  ctx.beginPath();
+  ctx.moveTo(-hw, -hh);
+  ctx.lineTo(-hw, hh);
+  ctx.moveTo(hw, -hh);
+  ctx.lineTo(hw, hh);
+  ctx.stroke();
+  // 용마루
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = rgba(PAL.ink, 0.92);
+  ctx.lineWidth = cn ? 0.34 : 0.26;
+  ctx.beginPath();
+  ctx.moveTo(-hw + 0.1, 0);
+  ctx.lineTo(hw - 0.1, 0);
+  ctx.stroke();
+  if (cn) {
+    // 용마루 끝 갈고리 (말려 올라간 치미)
+    ctx.lineWidth = 0.13;
+    ctx.beginPath();
+    for (const sd of [-1, 1]) {
+      ctx.moveTo(sd * (hw - 0.3), 0);
+      ctx.quadraticCurveTo(sd * (hw + 0.5), 0.05, sd * (hw + 0.35), -0.55);
+      ctx.quadraticCurveTo(sd * (hw + 0.1), -0.62, sd * (hw + 0.16), -0.36);
+    }
+    ctx.stroke();
+    // 처마 붉은 등 (작게, 몇 개만)
+    const n = Math.max(1, Math.round(W / 4.5));
+    for (let k = 0; k < n; k++) {
+      const x = -hw + ((k + 0.5) * W) / n;
+      ctx.fillStyle = rgba(PAL.seal, 0.9);
+      ctx.beginPath();
+      ctx.ellipse(x, hh + 0.3, 0.2, 0.26, 0, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = rgba(PAL.lantern, 0.75);
+      ctx.beginPath();
+      ctx.arc(x - 0.05, hh + 0.25, 0.07, 0, TAU);
+      ctx.fill();
+    }
+  } else {
+    ctx.strokeStyle = rgba('#c5cbc7', 0.45);
+    ctx.lineWidth = 0.07;
+    ctx.beginPath();
+    ctx.moveTo(-hw + 0.2, -0.05);
+    ctx.lineTo(hw - 0.2, -0.05);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** 일본식 세로 간판: 앞면에서 길 쪽으로 내민 좁은 판 (먹 글씨 점) */
+function signBoard(ctx, b) {
+  const p = b.parts[0], f = b.front || 's';
+  const ux = f === 'e' ? 1 : f === 'w' ? -1 : 0, uy = f === 's' ? 1 : f === 'n' ? -1 : 0;
+  const ex = p.x + ux * (p.w / 2 + 0.15) + (uy ? p.w * 0.28 : 0), ey = p.y + uy * (p.h / 2 + 0.15) + (ux ? p.h * 0.28 : 0);
+  ctx.save();
+  ctx.translate(ex, ey);
+  ctx.rotate(Math.atan2(uy, ux));
+  ctx.fillStyle = 'rgba(20,20,20,0.25)';
+  ctx.fillRect(0.12, -0.08, 1.3, 0.42);
+  ctx.fillStyle = PAL.whiteWall;
+  ctx.fillRect(0, -0.2, 1.3, 0.4);
+  ctx.strokeStyle = rgba(PAL.ink, 0.85);
+  ctx.lineWidth = 0.05;
+  ctx.strokeRect(0, -0.2, 1.3, 0.4);
+  ctx.lineWidth = 0.09;
+  ctx.beginPath();
+  for (let x = 0.22; x < 1.2; x += 0.3) {
+    ctx.moveTo(x, -0.08);
+    ctx.lineTo(x + 0.12, 0.06);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** 환구단: 세 단 둥근 돌 제단 + 네 방향 계단 + 난간 */
+function altarTop(ctx, b) {
+  const R = Math.min(b.w, b.h) / 2;
+  const stone = PAL.wallStone, lightS = mixHex(stone, PAL.paper, 0.45);
+  ctx.fillStyle = 'rgba(30,28,24,0.22)';
+  ctx.fillRect(-b.w / 2 + 0.5, -b.h / 2 + 0.7, b.w, b.h);
+  ctx.fillStyle = mixHex(stone, PAL.paper, 0.25);
+  ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h);
+  ctx.strokeStyle = rgba(PAL.ink, 0.75);
+  ctx.lineWidth = 0.1;
+  ctx.strokeRect(-b.w / 2, -b.h / 2, b.w, b.h);
+  const tiers = [0.86, 0.64, 0.42];
+  tiers.forEach((k, n) => {
+    const r = R * k;
+    ctx.fillStyle = 'rgba(30,28,24,0.2)';
+    ctx.beginPath();
+    ctx.arc(0.25, 0.35, r, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = mixHex(stone, lightS, 0.3 + n * 0.25);
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = rgba(PAL.ink, 0.8);
+    ctx.lineWidth = 0.09;
+    ctx.stroke();
+    // 난간: 단 가장자리 안쪽 점선
+    ctx.save();
+    ctx.setLineDash([0.25, 0.35]);
+    ctx.strokeStyle = rgba(PAL.ink2, 0.55);
+    ctx.lineWidth = 0.12;
+    ctx.beginPath();
+    ctx.arc(0, 0, r - 0.35, 0, TAU);
+    ctx.stroke();
+    ctx.restore();
+  });
+  // 네 방향 계단
+  const sw = R * 0.2;
+  for (let q = 0; q < 4; q++) {
+    ctx.save();
+    ctx.rotate((q * Math.PI) / 2);
+    ctx.fillStyle = mixHex(stone, PAL.paper, 0.55);
+    ctx.fillRect(R * 0.3, -sw / 2, R * 0.66, sw);
+    ctx.strokeStyle = rgba(PAL.ink, 0.5);
+    ctx.lineWidth = 0.05;
+    ctx.beginPath();
+    for (let x = R * 0.32; x < R * 0.96; x += 0.4) {
+      ctx.moveTo(x, -sw / 2);
+      ctx.lineTo(x, sw / 2);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = rgba(PAL.ink, 0.8);
+    ctx.lineWidth = 0.07;
+    ctx.strokeRect(R * 0.3, -sw / 2, R * 0.66, sw);
+    ctx.restore();
+  }
+  ctx.fillStyle = rgba(PAL.paper, 0.9);
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.12, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = rgba(PAL.ink, 0.7);
+  ctx.lineWidth = 0.06;
+  ctx.stroke();
+}
+
+/** 독립문: 위에서 본 화강암 덩어리 (마름돌 줄눈 + 여장 띠) */
+function archTop(ctx, b) {
+  const hw = b.w / 2, hh = b.h / 2;
+  ctx.fillStyle = 'rgba(30,28,24,0.28)';
+  ctx.fillRect(-hw + 0.35, -hh + 0.5, b.w, b.h);
+  ctx.fillStyle = mixHex(PAL.wallStone, PAL.paper, 0.35);
+  ctx.fillRect(-hw, -hh, b.w, b.h);
+  ctx.fillStyle = mixHex(PAL.wallStone, PAL.ink, 0.12);
+  ctx.fillRect(-hw, hh - 0.45, b.w, 0.45);
+  ctx.strokeStyle = rgba(PAL.ink2, 0.35);
+  ctx.lineWidth = 0.04;
+  ctx.beginPath();
+  for (let y = -hh + 0.6, row = 0; y < hh; y += 0.6, row++) {
+    ctx.moveTo(-hw, y);
+    ctx.lineTo(hw, y);
+    for (let x = -hw + (row & 1 ? 0.45 : 0.9); x < hw; x += 0.9) {
+      ctx.moveTo(x, y - 0.6);
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.stroke();
+  ctx.strokeStyle = rgba(PAL.ink, 0.88);
+  ctx.lineWidth = 0.1;
+  ctx.strokeRect(-hw, -hh, b.w, b.h);
+  ctx.lineWidth = 0.05;
+  ctx.strokeRect(-hw + 0.3, -hh + 0.3, b.w - 0.6, b.h - 0.6);
+  // 가운데 현판 자리
+  ctx.fillStyle = rgba(PAL.ink, 0.7);
+  ctx.fillRect(-0.7, -0.18, 1.4, 0.36);
+}
+
+/** 불탄 전차 잔해: 그을린 차체, 무너진 지붕판 사이로 드러난 갈비뼈, 꺾인 집전봉 */
+function wreckTop(ctx, b) {
+  const hw = b.w / 2, hh = b.h / 2;
+  ctx.fillStyle = rgba(PAL.ink, 0.22);
+  ctx.beginPath();
+  ctx.ellipse(0.3, 0.4, hw + 1.2, hh + 1.1, 0, 0, TAU);
+  ctx.fill();
+  const char = mixHex(PAL.tram, PAL.ink, 0.72);
+  ctx.fillStyle = char;
+  ctx.fillRect(-hw, -hh, b.w, b.h);
+  // 남은 지붕판 (군데군데)
+  for (let x = -hw + 0.2; x < hw - 0.3; x += 0.9) {
+    if (rnd() < 0.45) continue;
+    ctx.fillStyle = rgba(mixHex(PAL.tram, PAL.ink, 0.35 + rnd() * 0.3), 0.9);
+    ctx.fillRect(x, -hh + 0.2, 0.8, b.h - 0.4 - rnd() * 0.6);
+  }
+  ctx.fillStyle = rgba(PAL.tram, 0.55);
+  ctx.fillRect(-hw + 0.1, -hh + 0.1, 0.9, b.h - 0.2);
+  ctx.strokeStyle = rgba(PAL.ink, 0.85);
+  ctx.lineWidth = 0.08;
+  ctx.beginPath();
+  for (let x = -hw + 0.45; x < hw; x += 0.9) {
+    ctx.moveTo(x, -hh);
+    ctx.lineTo(x + (rnd() - 0.5) * 0.15, hh);
+  }
+  ctx.stroke();
+  ctx.lineWidth = 0.12;
+  ctx.strokeRect(-hw, -hh, b.w, b.h);
+  // 그을음 얼룩·재
+  ctx.fillStyle = rgba(PAL.ink, 0.35);
+  ctx.beginPath();
+  for (let k = 0; k < 6; k++) {
+    const x = (rnd() - 0.5) * b.w * 0.9, y = (rnd() - 0.5) * b.h * 0.8, r = 0.25 + rnd() * 0.5;
+    ctx.moveTo(x + r, y);
+    ctx.ellipse(x, y, r, r * 0.7, rnd() * 3, 0, TAU);
+  }
+  ctx.fill();
+  ctx.fillStyle = rgba(PAL.paper, 0.45);
+  for (let k = 0; k < 14; k++) ctx.fillRect((rnd() - 0.5) * b.w, (rnd() - 0.5) * b.h, 0.1, 0.1);
+  // 꺾인 집전봉
+  ctx.strokeStyle = rgba(PAL.ink, 0.9);
+  ctx.lineWidth = 0.07;
+  ctx.beginPath();
+  ctx.moveTo(-0.4, 0);
+  ctx.lineTo(1.2, 0.5);
+  ctx.lineTo(2.1, 1.6);
+  ctx.stroke();
+}
+
+/** 공사 중 골조: 기둥·도리·서까래 */
+function drawFrame(ctx, p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  const long = p.w >= p.h;
+  if (!long) ctx.rotate(Math.PI / 2);
+  const W = long ? p.w : p.h, H = long ? p.h : p.w, hw = W / 2 - 0.4, hh = H / 2 - 0.4;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = rgba(PAL.timber, 0.95);
+  ctx.lineWidth = 0.12;
+  ctx.beginPath();
+  for (let x = -hw; x <= hw + 0.01; x += 0.8) {
+    ctx.moveTo(x, -hh);
+    ctx.lineTo(x, hh);
+  }
+  ctx.stroke();
+  ctx.lineWidth = 0.2;
+  ctx.beginPath();
+  for (const y of [-hh, 0, hh]) {
+    ctx.moveTo(-hw - 0.2, y);
+    ctx.lineTo(hw + 0.2, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = rgba(mixHex(PAL.timber, PAL.ink, 0.35), 0.95);
+  for (let x = -hw; x <= hw + 0.01; x += Math.max(1.6, (2 * hw) / Math.round((2 * hw) / 2.4)))
+    for (const y of [-hh, hh]) ctx.fillRect(x - 0.17, y - 0.17, 0.34, 0.34);
+  ctx.strokeStyle = rgba(PAL.ink, 0.5);
+  ctx.lineWidth = 0.04;
+  ctx.strokeRect(-hw, -hh, 2 * hw, 2 * hh);
+  ctx.restore();
+}
+
 /** 빠른 대체 그림 (캐시가 아직 없을 때) */
 function drawRoofSimple(ctx, b) {
-  const col = b.roof === 'thatch' || b.roof === 'hut' ? PAL.roofThatch : b.roof === 'western' ? PAL.brick : PAL.roofTile;
+  const R = b.roof;
+  const col = R === 'thatch' || R === 'hut' ? PAL.roofThatch : R === 'western' ? PAL.brick : R === 'jp' ? PAL.jpRoof : R === 'cn' ? PAL.cnBrick : R === 'altar' || R === 'arch' ? PAL.wallStone : R === 'wreck' ? PAL.ink2 : PAL.roofTile;
   ctx.fillStyle = col;
   ctx.strokeStyle = rgba(PAL.ink, 0.8);
   ctx.lineWidth = 0.1;
@@ -1246,6 +1630,13 @@ export class RoofRenderer {
     ctx.lineJoin = 'round';
     drawRoof(ctx, b);
     return { tier, scale: t, canvas: cv, px: Math.ceil(w) * Math.ceil(h), rx0, ry0, rw: rx1 - rx0, rh: ry1 - ry0 };
+  }
+  /** 건물 하나의 지붕 캐시를 버린다 (골조 ↔ 완성 등) */
+  invalidate(id) {
+    const e = this.cache.get(id);
+    if (!e) return;
+    this.px -= e.px;
+    this.cache.delete(id);
   }
   /** 화면 배율(기기 px/m)에 맞는 지붕 캐시 해상도 */
   tierFor(game) {
@@ -1381,10 +1772,14 @@ export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
   }
   // 기단(돌)·벽체·바닥
   for (const b of list) {
+    if (NO_BASE[b.roof]) {
+      if (b.roof === 'wreck') scorch(ctx, b);
+      continue;
+    }
     ctx.save();
     ctx.translate(b.x, b.y);
     ctx.rotate(b.angle);
-    const western = b.roof === 'western';
+    const western = b.roof === 'western', jp = b.roof === 'jp', cn = b.roof === 'cn';
     if (isThatch(b)) {
       // 초가: 낮은 흙 기단 + 둥근 처마 밖으로 모서리가 비어져 나오지 않게 안으로 들이고 모를 죽인다
       for (const p of b.parts) {
@@ -1420,14 +1815,29 @@ export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
     for (const p of b.parts) {
       const hw = p.w / 2 - b.eave, hh = p.h / 2 - b.eave;
       if (hw <= 0 || hh <= 0) continue;
-      ctx.fillStyle = western ? mixHex(PAL.brick, PAL.paper, 0.35) : PAL.wallStone;
+      ctx.fillStyle = western ? mixHex(PAL.brick, PAL.paper, 0.35) : cn ? mixHex(PAL.cnBrick, PAL.paper, 0.15) : PAL.wallStone;
       ctx.fillRect(p.x - hw - 0.35, p.y - hh - 0.35, hw * 2 + 0.7, hh * 2 + 0.7);
-      ctx.fillStyle = western ? PAL.whiteWall : mixHex(PAL.timber, PAL.paper, 0.55);
+      ctx.fillStyle = western ? PAL.whiteWall : jp ? mixHex(PAL.roofThatch, PAL.paper, 0.55) : cn ? mixHex(PAL.cnBrick, PAL.paper, 0.5) : mixHex(PAL.timber, PAL.paper, 0.55);
       ctx.fillRect(p.x - hw, p.y - hh, hw * 2, hh * 2);
       ctx.strokeStyle = rgba(PAL.ink, 0.6);
       ctx.lineWidth = 0.08;
       ctx.strokeRect(p.x - hw, p.y - hh, hw * 2, hh * 2);
-      if (!western) {
+      if (jp || cn) {
+        // 다다미(0.9×1.8) / 벽돌 바닥 줄눈
+        const gx = jp ? 1.8 : 0.5, gy = jp ? 0.9 : 0.25;
+        ctx.strokeStyle = rgba(jp ? PAL.timber : PAL.ink2, jp ? 0.35 : 0.2);
+        ctx.lineWidth = jp ? 0.05 : 0.03;
+        ctx.beginPath();
+        for (let x = p.x - hw + gx; x < p.x + hw; x += gx) {
+          ctx.moveTo(x, p.y - hh);
+          ctx.lineTo(x, p.y + hh);
+        }
+        for (let y = p.y - hh + gy; y < p.y + hh; y += gy) {
+          ctx.moveTo(p.x - hw, y);
+          ctx.lineTo(p.x + hw, y);
+        }
+        ctx.stroke();
+      } else if (!western) {
         // 마루 널 + 기둥
         ctx.strokeStyle = rgba(PAL.timber, 0.35);
         ctx.lineWidth = 0.04;
@@ -1450,7 +1860,45 @@ export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
       ctx.fillStyle = rgba(PAL.wallStone, 0.95);
       ctx.fillRect(b.door.x - 0.45, b.door.y - 0.3, 0.9, 0.6);
     }
+    // 잠긴 성문: 닫힌 두 문짝 (문루 밑으로 들어가면 보인다)
+    if (b.locked && b.gate) {
+      const g = b.gate;
+      ctx.save();
+      ctx.translate(g.x, g.y);
+      ctx.rotate(g.angle);
+      ctx.fillStyle = mixHex(PAL.timber, PAL.ink, 0.3);
+      ctx.fillRect(-g.w / 2, -0.32, g.w, 0.64);
+      ctx.strokeStyle = rgba(PAL.ink, 0.85);
+      ctx.lineWidth = 0.07;
+      ctx.strokeRect(-g.w / 2, -0.32, g.w, 0.64);
+      ctx.beginPath();
+      ctx.moveTo(0, -0.32);
+      ctx.lineTo(0, 0.32);
+      ctx.stroke();
+      ctx.fillStyle = rgba(PAL.ink, 0.8);
+      for (let x = -g.w / 2 + 0.4; x < g.w / 2; x += 0.55) ctx.fillRect(x - 0.05, -0.05, 0.1, 0.1);
+      ctx.restore();
+    }
   }
+}
+
+/** 불탄 자리: 땅에 번진 그을음과 재 */
+function scorch(ctx, b) {
+  srand(b.seed + 5);
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(b.angle);
+  for (const [s, a] of [[1.9, 0.12], [1.35, 0.18], [1, 0.22]]) {
+    ctx.fillStyle = rgba(PAL.ink, a);
+    ctx.beginPath();
+    for (let k = 0; k < 5; k++) {
+      const x = (rnd() - 0.5) * b.w * 0.8, y = (rnd() - 0.5) * b.h, rx = (b.w / 4) * s * (0.7 + rnd() * 0.5), ry = b.h * 0.55 * s * (0.7 + rnd() * 0.5);
+      ctx.moveTo(x + rx, y);
+      ctx.ellipse(x, y, rx, ry, (rnd() - 0.5) * 0.4, 0, TAU);
+    }
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 /** 나무 밑동 그림자 (땅 청크) */

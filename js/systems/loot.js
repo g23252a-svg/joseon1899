@@ -1,8 +1,10 @@
 // 뒤지기·가죽·채집·상자 [파밍] — game.sys.loot (ARCHITECTURE §5, 스펙 E.1~E.3).
 //   rollTable(tableId, ctx?) → [{id, n}] ('money' 는 돈)   give(entries, source) → 실제로 받은 것   spawnContainer(x, y, tableId, opts)
-//   (추가) start(label, sec, done) 시간 걸리는 동작(조작 잠금 + 진행 고리), busy, carried(어깨에 멘 짐승), dropCarry(), lootBody(h), skin(animal)
-// 사람 시체 E '뒤지기'(1.2초, 민간인을 목격되며 뒤지면 crime looting), 죽은 짐승 E '가죽 벗기기'(3초 × skinSpeed, 꿩은 1초),
-// 중·대형 짐승 F '어깨에 메기'(이동 ×0.6, 말 곁 F '말에 싣기' = horse.stow 가 있을 때), 채집물 E '캐기'(1.5초, 다시 남 하루·싸리 반나절).
+//   (추가) start(label, sec, done) 시간 걸리는 동작(조작 잠금 + 진행 고리), busy, carried(어깨에 멘 짐승), dropCarry(), dropHeavy(),
+//          lootBody(h), skin(animal), LOOT_TABLES
+// 사람 시체 E '뒤지기'(1.2초, 민간인이면 crime looting — 목격 판정은 wanted), 죽은 짐승 E '가죽 벗기기'(3초 × skinSpeed, 꿩은 1초),
+// 중·대형 짐승 F '어깨에 메기'(말 곁 F '말에 싣기' = horse.stow), 채집물 E '캐기'(1.5초, 다시 남 하루·싸리 반나절).
+// 짐(멘 짐승·무거운 짐 heavy): 걸음 ×0.6, 질주·구르기 불가, 말 위면 말 속도 ×0.8. 무거운 짐은 X 길게(1초)로 내려놓고 E 로 다시 든다.
 
 import { Entity, LAYER } from '../engine/entity.js';
 import { FONT, PAL } from '../engine/palette.js';
@@ -97,27 +99,30 @@ class Plant extends Entity {
   }
 }
 
+// 상자·궤짝. opts.pickup = 내려놓은 무거운 짐(줍기만 하고 사라진다)
 class Container extends Entity {
   constructor(x, y, o) {
     super({ id: o.id, x, y, angle: o.angle ?? 0, static: true, solid: false, radius: 0.45, layer: LAYER.LOW });
     Object.assign(this, { kind: 'container', table: o.table, opts: o, label: o.name || '궤짝', opened: false });
   }
   getInteractions(actor, g) {
-    const L = g.sys.loot;
+    const L = g.sys.loot, pk = this.opts.pickup;
     if (!actor?.isPlayer || this.opened || L?.carried) return [];
-    return [{ key: 'interact', label: `${this.label} 열기`, priority: 4, run: () => L?.start(`${this.label} 여는 중`, 1.0, () => L.openContainer(this)) }];
+    const label = `${this.label} ${pk ? '들기' : '열기'}`;
+    return [{ key: 'interact', label, priority: 4, run: () => L?.start(pk ? label : `${this.label} 여는 중`, pk ? 0.6 : 1.0, () => L.openContainer(this)) }];
   }
   draw(ctx) {
+    const pk = this.opts.pickup;
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
     ctx.lineWidth = 0.04;
     ctx.strokeStyle = PAL.ink;
-    ctx.fillStyle = this.opened ? PAL.ink2 : PAL.timber;
+    ctx.fillStyle = pk ? (itemDef(pk)?.icon?.shape === 'box' ? PAL.ink2 : PAL.roofThatch) : this.opened ? PAL.ink2 : PAL.timber;
     ctx.fillRect(-0.4, -0.27, 0.8, 0.54);
     ctx.strokeRect(-0.4, -0.27, 0.8, 0.54);
     ctx.fillStyle = PAL.gold;
-    if (!this.opened) ctx.fillRect(-0.06, -0.08, 0.12, 0.16); // 자물쇠
+    if (!this.opened && !pk) ctx.fillRect(-0.06, -0.08, 0.12, 0.16); // 자물쇠
     ctx.restore();
   }
 }
@@ -136,6 +141,9 @@ class Loot {
     this.ssari = new Map(); // 칸 key → Plant
     this.ssariPicked = new Map(); // 칸 key → 다시 나는 시각
     this._scan = 0;
+    this._mul = 1; // 짐 때문에 곱한 걸음 배수
+    this._setMul = null;
+    this._sprint0 = null;
   }
 
   // ------------------------------------------------------------ 표·주기
@@ -189,17 +197,14 @@ class Loot {
     const g = this.game;
     if (!h || h.looted) return;
     h.looted = true;
-    const w = h.weapon?.id ?? null, ml = h.loot ?? h.data?.loot; // 미션 전리품이 표보다 앞선다
+    const w = (typeof h.weapon === 'string' ? h.weapon : h.weapon?.id) ?? null, ml = h.loot ?? h.data?.loot; // 미션 전리품이 표보다 앞선다
     const entries = Array.isArray(ml) ? [...ml] : [];
-    if (ITEMS[w]?.cat === 'weapon') entries.push({ id: w, n: 1 }); // 든 무기는 늘 떨어뜨린다
+    // 든 무기는 늘 떨어뜨린다 (이미 가진 무기면 두고 간다)
+    if (ITEMS[w]?.cat === 'weapon' && (g.sys.inventory?.room?.(w) ?? 1) > 0) entries.push({ id: w, n: 1 });
     entries.push(...this.rollTable(tableFor(h), { weapon: w }));
     if (!this.give(entries, h).length) g.notify('아무것도 없습니다');
-    if (CIVIL.has(h.faction) && this.witnessed(h)) g.emit('crime', { kind: 'looting', x: h.x, y: h.y, offender: g.player, victim: h });
-  }
-  /** 낮 25 m · 밤 12 m 안에 볼 사람이 있는가 */
-  witnessed(victim) {
-    const g = this.game, p = g.player, R = g.sys.time?.isNight?.() ? 12 : 25;
-    return !!g.nearest(p.x, p.y, R, (e) => e.kind === 'human' && e !== p && e !== victim && e.state === 'normal' && e.faction !== 'gang' && e.faction !== 'rival');
+    // 목격 판정은 wanted 가 한다
+    if (CIVIL.has(h.faction)) g.emit('crime', { kind: 'looting', x: h.x, y: h.y, offender: g.player, victim: h });
   }
   skin(a) {
     const g = this.game;
@@ -213,23 +218,44 @@ class Loot {
     g.emit('skin', { animal: a, species: a.species, quality: q, items });
   }
   pickUp(a) {
-    const p = this.game.player;
-    if (!p || this.carried || !a?.alive) return;
+    const g = this.game, p = g.player;
+    if (!p || this.carried || !a?.alive || p.vehicle) return;
+    if (g.sys.inventory?.heavy?.()) return g.notify('무거운 짐을 들고는 멜 수 없습니다', 'warn');
     this.carried = a;
     a.hidden = true;
     a.solid = false;
     p.carry = { kind: 'carcass', animal: a, species: a.species, color: a.spec?.color || PAL.timber };
-    p.speedMul = (p.speedMul ?? 1) * 0.6;
   }
   dropCarry(stowed = false) {
     const a = this.carried, p = this.game.player;
     if (!a) return;
     this.carried = null;
     if (p?.carry?.animal === a) p.carry = null;
-    if (p) p.speedMul = (p.speedMul ?? 0.6) / 0.6;
     if (stowed) return this.game.remove(a); // 말 짐칸에는 기록만 남는다
     a.hidden = false;
     if (p) [a.x, a.y] = [p.x - Math.cos(p.angle) * 0.9, p.y - Math.sin(p.angle) * 0.9];
+  }
+  /** 무거운 짐을 발치에 내려놓는다 (E 로 다시 든다) */
+  dropHeavy() {
+    const g = this.game, p = g.player, inv = g.sys.inventory, id = inv?.heavy?.();
+    if (!p || !id || !inv.remove(id, 1)) return null;
+    g.notify(`${itemDef(id)?.name || id}을(를) 내려놓았다`);
+    return this.spawnContainer(p.x + Math.cos(p.angle) * 0.8, p.y + Math.sin(p.angle) * 0.8, null, { name: itemDef(id)?.name || '짐', items: [{ id, n: 1 }], pickup: id, angle: p.angle });
+  }
+
+  /** 짐 무게 (매 틱): 멘 짐승·무거운 짐 → 걸음 ×0.6, 질주·구르기 불가. speedMul 은 남이 쓴 값을 바탕으로 곱한다 */
+  applyLoad(p, g, dt) {
+    const heavy = g.sys.inventory?.heavy?.(), load = !!(this.carried || heavy) && !p.vehicle && p.state === 'normal';
+    const base = p.speedMul === this._setMul ? (p.speedMul ?? 1) / this._mul : p.speedMul ?? 1;
+    this._mul = load ? 0.6 : 1;
+    p.speedMul = this._setMul = base * this._mul;
+    if (load && this._sprint0 == null) [this._sprint0, p.speedSprint] = [p.speedSprint, p.speedRun];
+    else if (!load && this._sprint0 != null) [p.speedSprint, this._sprint0] = [this._sprint0, null];
+    if (load) g.input?.consume?.('brake'); // 구르기 막기
+    if (!heavy) return (this._holdX = 0);
+    // X 길게 1초 → 내려놓기
+    if (!p.vehicle && p.state === 'normal' && g.input?.down?.('holster')) (this._holdX = (this._holdX || 0) + dt) >= 1 && ((this._holdX = -99), this.dropHeavy());
+    else this._holdX = 0;
   }
 
   provide(actor, t, g) {
@@ -238,10 +264,10 @@ class Loot {
       if (t) return null;
       const out = [{ key: 'interact', label: '짐승 내려놓기', priority: 6, run: () => this.dropCarry() }];
       const h = g.sys.vehicles?.playerHorse;
-      if (typeof h?.stow === 'function' && Math.hypot(h.x - actor.x, h.y - actor.y) < 3.5) out.push({ key: 'enter', label: '말에 싣기', priority: 6, run: () => this.stowOn(h) });
+      if (typeof h?.stow === 'function' && !h.stabled && Math.hypot(h.x - actor.x, h.y - actor.y) < 3.5) out.push({ key: 'enter', label: '말에 싣기', priority: 6, run: () => this.stowOn(h) });
       return out;
     }
-    if (!t) return null;
+    if (!t) return g.sys.inventory?.heavy?.() ? [{ key: 'interact', label: '짐 내려놓기', priority: 0, run: () => this.dropHeavy() }] : null;
     const rec = carcassIn(t);
     if (rec) return [{ key: 'interact', label: '실은 짐승 가죽 벗기기', priority: 5, run: () => this.start('가죽 벗기는 중', 3 * smod(g, 'skinSpeed'), () => carcassIn(t) === rec && (t.cargo[rec.slot].splice(t.cargo[rec.slot].indexOf(rec), 1), this.skin(rec))) }];
     if (t.kind === 'human' && t.state === 'dead' && !t.looted && !t.isPlayer)
@@ -263,17 +289,19 @@ class Loot {
     return true;
   }
 
-  // ------------------------------------------------------------ 상자 (opts: name, items, money, owner → 목격되면 theft)
+  // ------------------------------------------------------------ 상자 (opts: id, name, items:[{id,n}], money, owner → crime theft, angle, pickup)
   spawnContainer(x, y, tableId = 'lt_crate', opts = {}) {
     return this.game.add(new Container(x, y, { ...opts, table: tableId }));
   }
   openContainer(c) {
-    const g = this.game;
+    const g = this.game, o = c?.opts;
     if (!c || c.opened) return;
+    if (o.pickup && !(g.sys.inventory?.room?.(o.pickup) > 0)) return g.notify('이미 무거운 짐을 들고 있습니다', 'warn');
     c.opened = true;
-    const o = c.opts, entries = [...(o.items || []), ...(c.table ? this.rollTable(c.table) : []), { id: 'money', n: o.money || 0 }];
-    if (!this.give(entries, c).length) g.notify('비어 있습니다');
-    if (o.owner && this.witnessed(null)) g.emit('crime', { kind: 'theft', x: c.x, y: c.y, offender: g.player, victim: c });
+    const entries = [...(o.items || []), ...(c.table ? this.rollTable(c.table) : []), { id: 'money', n: o.money || 0 }];
+    if (!this.give(entries, c, !!o.pickup).length) g.notify('비어 있습니다');
+    if (o.pickup) g.remove(c);
+    if (o.owner) g.emit('crime', { kind: 'theft', x: c.x, y: c.y, offender: g.player, victim: c }); // 목격 판정은 wanted
   }
 
   // ------------------------------------------------------------ 채집
@@ -365,6 +393,8 @@ class Loot {
     game.addInteractionProvider((actor, t, g) => this.provide(actor, t, g));
     game.on('damage', (e) => e.target === game.player && this.endBusy(false));
     game.addScreenRenderer((ctx, g) => this.drawBusy(ctx, g), 50);
+    // 자유 탐험 중 죽으면 무거운 짐은 그 자리에 떨어진다 (미션 중이면 미션이 다시 쥐여 준다)
+    game.on('player:dead', () => !game.sys.missions?.active && this.dropHeavy());
     this.placePlants();
   }
   update(dt, realDt, game) {
@@ -376,10 +406,19 @@ class Loot {
     if (a && (!a.alive || !p)) this.carried = null;
     else if (a && (p.state === 'dead' || p.vehicle)) this.stowOn(p.vehicle) || this.dropCarry();
     else if (a) [a.x, a.y] = [p.x, p.y];
-    if (p && (this._scan -= dt) <= 0) {
+    if (!p) return;
+    this.applyLoad(p, game, realDt);
+    if ((this._scan -= dt) <= 0) {
       this._scan = 2;
       this.scanSsari(p);
     }
+  }
+  /** 무거운 짐을 실은 말은 ×0.8 (말 물리 뒤에 속도를 누른다) */
+  lateUpdate(dt, realDt, game) {
+    const v = game.player?.vehicle;
+    if (v?.moveMode !== 'horse' || v.driver !== game.player || !game.sys.inventory?.heavy?.()) return;
+    const lim = (v.ctl?.sprint ? v.sprintSpeed : v.maxSpeed) * 0.8;
+    if (v.speed > lim) v.speed = lim;
   }
   drawBusy(ctx, g) {
     const b = this.busy, p = g.player;

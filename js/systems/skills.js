@@ -1,19 +1,17 @@
-// 스킬 [전투] — 5계통 × 3 = 15 스킬, 계통 경험치·단(1~10)·공용 점수, 보정치 mod(key, base).
+// 스킬 [전투] — 5계통 × 3 = 15 스킬, 계통 경험치·단(1~10)·공용 점수, 보정치 mod(key, base). 스펙 F.2·F.3.
 //
-//   game.sys.skills: TREES  XP_LEVELS  MAX_LEVEL  xpForLevel(L)  level(tree)  xp(tree)  progress(tree) 0~1
-//     addXP(tree, n, reason)  points  has(id)  canLearn(id)  learn(id) → bool
-//     mod(key, base = 1) = (base + Σadd) × Πmul      계약 밖: grant(id)(미션이 무료로 줌), skill(id) → 정의
+//   game.sys.skills: TREES  XP_LEVELS  MAX_LEVEL  xpForLevel(L)  level(tree)  xp(tree)  addXP(tree, n, reason)  points
+//     has(id)  canLearn(id)  learn(id) → bool  mod(key, base = 1) = (base + Σadd) × Πmul
+//   계약 밖: progress(tree) 0~1 · grant(id)(미션이 무료로 줌) · skill(id) → 정의 · sizeOf(animal) → 'S'|'M'|'L'
 //   이벤트: skill:xp {tree, amount, level, reason}, skill:levelup {tree, level}, skill:learn {skillId}
 //
-// mod 키 (가산 +, 곱 ×; 없으면 base 그대로)
+// mod 키 (가산 +, 곱 ×; 배운 것이 없으면 base 그대로)
 //   무예   meleeEvade+ bladeDamage× meleeSpeed×(휘두르기 간격) healthMax+ meleeTaken× meleeDamage×(단)
 //   사격   aimSteady× matchlockReload× misfire× matchcordBurn×(화승 타는 속도) hoanMax+ hoanDrain× gunSpread×(단)
 //   생존   skinSpeed×(단) skinQuality+ trackRadius+ windArrow+ animalDetect× gatherBonus+ herbGlow+
 //   기마   horseBond× whistleRadius× boatSpeed× rowStamina× cartSpeed× cartStuck× horseStamina×(단)
 //   처세   priceSell×(단) priceBuy× stealthNoise× crouchSpeed× intimidate+(목격자 위협 0.7 → 0.95) surrenderBonus+
 //   스킬 없이 기본값만 쓰는 키(풀 버전 자리): gunDamage headZone bowDraw reloadSpeed nonLethal
-
-const sys = (g) => g.sys;
 
 export const XP_LEVELS = [0, 0, 100, 303, 580, 919, 1313, 1758, 2250, 2786, 3363];
 export const xpForLevel = (L) => (L <= 1 ? 0 : Math.round(100 * Math.pow(L - 1, 1.6)));
@@ -70,13 +68,14 @@ const KILL_XP = { S: 5, M: 10, L: 20 };
 const SKIN_XP = { S: 8, M: 15, L: 30 };
 const CRAFT_XP = { rc_arrow: ['sagyeok', 2], rc_roast: ['saengjon', 3], rc_stew: ['saengjon', 5], rc_salve: ['saengjon', 8], rc_galgeun: ['saengjon', 8], rc_ball: ['sagyeok', 4], rc_matchcord: ['sagyeok', 4], rc_club: ['muye', 3] };
 const RIDE_TYPES = new Set(['oxcart', 'rickshaw', 'gama']);
+const MELEE = new Set(['melee', 'fist']);
 
 const DEFS = new Map();
 for (const t of TREES) for (const s of t.skills) DEFS.set(s.id, { ...s, tree: t.id });
 
 /** 짐승 크기 S/M/L (animals 의 정의를 먼저 본다) */
 export function sizeOf(a) {
-  const s = a?.size ?? a?.def?.size ?? a?.spec?.size ?? SIZE[a?.species?.id ?? a?.species];
+  const s = a?.size ?? a?.spec?.size ?? a?.def?.size ?? SIZE[a?.species?.id ?? a?.species];
   if (s === 'S' || s === 'M' || s === 'L') return s;
   const hp = a?.maxHp || 60;
   return hp < 40 ? 'S' : hp < 120 ? 'M' : 'L';
@@ -84,33 +83,14 @@ export function sizeOf(a) {
 
 class Skills {
   constructor(game) {
-    this.name = 'skills';
-    this.order = 10;
-    this.game = game;
-    this.TREES = TREES;
-    this.XP_LEVELS = XP_LEVELS;
-    this.MAX_LEVEL = MAX_LEVEL;
-    this.xpForLevel = xpForLevel;
-    this.points = 2;
-    this.learned = new Set();
+    Object.assign(this, { name: 'skills', order: 10, game, TREES, XP_LEVELS, MAX_LEVEL, xpForLevel, sizeOf, points: 2, learned: new Set() });
     this._xp = Object.fromEntries(TREES.map((t) => [t.id, 0]));
-    this._add = {};
-    this._mul = {};
-    this._dirty = true;
-    this._hits = new WeakMap(); // 같은 대상 근접 명중 횟수
-    this._dist = { horse: 0, row: 0, cart: 0, sneak: 0 };
-    this._last = null;
-    this._acc = 0;
-    this._daily = { day: -1 };
+    Object.assign(this, { _add: {}, _mul: {}, _dirty: true, _hits: new WeakMap(), _dist: { horse: 0, row: 0, cart: 0, sneak: 0 }, _last: null, _acc: 0, _daily: { day: -1 } });
   }
 
   // ------------------------------------------------------------ 조회
-  skill(id) {
-    return DEFS.get(id) || null;
-  }
-  xp(tree) {
-    return this._xp[tree] ?? 0;
-  }
+  skill(id) { return DEFS.get(id) || null; }
+  xp(tree) { return this._xp[tree] ?? 0; }
   level(tree) {
     const x = this._xp[tree];
     if (x == null) return 0;
@@ -124,13 +104,10 @@ class Skills {
     const a = XP_LEVELS[L], b = XP_LEVELS[L + 1];
     return Math.max(0, Math.min(1, (this.xp(tree) - a) / (b - a)));
   }
-  has(id) {
-    return this.learned.has(id);
-  }
+  has(id) { return this.learned.has(id); }
   canLearn(id) {
     const s = DEFS.get(id);
-    if (!s || this.learned.has(id) || this.points < s.cost) return false;
-    if (this.level(s.tree) < s.level) return false;
+    if (!s || this.learned.has(id) || this.points < s.cost || this.level(s.tree) < s.level) return false;
     return (s.requires || []).every((r) => this.learned.has(r));
   }
   mod(key, base = 1) {
@@ -141,8 +118,7 @@ class Skills {
   // ------------------------------------------------------------ 변경
   learn(id) {
     if (!this.canLearn(id)) return false;
-    const s = DEFS.get(id);
-    this.points -= s.cost;
+    this.points -= DEFS.get(id).cost;
     return this.grant(id);
   }
   /** 점수 없이 익힘 (미션 보상 등) */
@@ -179,34 +155,30 @@ class Skills {
       for (const [k, v] of Object.entries(s?.mul || {})) mul[k] = (mul[k] ?? 1) * v;
     }
     for (const [tree, [k, r]] of Object.entries(LEVEL_MOD)) mul[k] = (mul[k] ?? 1) * (1 + r * (this.level(tree) - 1));
-    this._add = add;
-    this._mul = mul;
-    this._dirty = false;
+    Object.assign(this, { _add: add, _mul: mul, _dirty: false });
   }
-  /** 하루 한도가 있는 경험치 */
+  /** 하루 한도가 있는 경험치 (횟수) */
   _capped(key, cap, tree, n) {
     const day = this.game.sys.time?.day ?? 0;
     if (this._daily.day !== day) this._daily = { day };
-    const used = this._daily[key] || 0;
-    if (used >= cap) return;
-    this._daily[key] = used + 1;
+    if ((this._daily[key] || 0) >= cap) return;
+    this._daily[key] = (this._daily[key] || 0) + 1;
     this.addXP(tree, n, key);
   }
   _travel(key, d, per, tree, n = 1) {
     this._dist[key] += d;
-    while (this._dist[key] >= per) {
-      this._dist[key] -= per;
-      this.addXP(tree, n, key);
-    }
+    for (; this._dist[key] >= per; this._dist[key] -= per) this.addXP(tree, n, key);
   }
 
-  // ------------------------------------------------------------ 행동 경험치
+  // ------------------------------------------------------------ 행동 경험치 (F.3)
   init(g) {
     const isP = (e) => !!e && (e === g.player || e.isPlayer === true);
     g.on('hit', (e) => {
       if (isP(e.target) && e.blocked) return this.addXP('muye', 2, 'block');
-      if (!isP(e.source) || !e.target || isP(e.target) || !(e.amount > 0)) return;
-      if (e.kind === 'melee' || e.kind === 'fist') {
+      if (!isP(e.source) || !e.target || isP(e.target)) return;
+      if (e.stealth) return e.ko && this.addXP('muye', 15, 'stealth'); // 잠입 기절 (잠입 살해는 kill 에서)
+      if (!(e.amount > 0) && !e.ko) return;
+      if (MELEE.has(e.kind)) {
         const n = (this._hits.get(e.target) || 0) + 1;
         this._hits.set(e.target, n);
         if (n <= 10) this.addXP('muye', 3, 'hit');
@@ -218,7 +190,7 @@ class Skills {
       if (!v || !isP(e.killer)) return;
       if (v.kind === 'human') {
         if (info.stealth) this.addXP('muye', 15, 'stealth');
-        else if (info.kind === 'melee' || info.kind === 'fist') this.addXP('muye', 10, 'kill');
+        else if (MELEE.has(info.kind)) this.addXP('muye', 10, 'kill');
         else if (info.kind === 'bullet' || info.kind === 'arrow') this.addXP('sagyeok', 8, 'kill');
       } else if (v.kind === 'animal') this.addXP('sagyeok', KILL_XP[sizeOf(v)], 'hunt');
       else return;
@@ -228,16 +200,14 @@ class Skills {
     g.on('skin', (e) => this.addXP('saengjon', SKIN_XP[sizeOf(e.animal)] * ((e.quality ?? 1) >= 3 ? 1.5 : 1), 'skin'));
     g.on('gather', () => this.addXP('saengjon', 3, 'gather'));
     g.on('craft', (e) => {
-      const c = CRAFT_XP[e.recipeId];
-      if (c) this.addXP(c[0], c[1], 'craft');
+      const xp = e.xp && typeof e.xp === 'object' ? Object.entries(e.xp) : CRAFT_XP[e.recipeId] ? [CRAFT_XP[e.recipeId]] : [];
+      for (const [tree, n] of xp) this.addXP(tree, n, 'craft');
     });
-    g.on('sell', (e) => {
-      const total = e.total ?? (e.price || 0) * (e.n || 1);
-      this.addXP('cheose', Math.min(25, Math.floor(total / 10)), 'sell');
-    });
+    g.on('sell', (e) => this.addXP('cheose', Math.min(25, Math.floor((e.total ?? (e.price || 0) * (e.n || 1)) / 10)), 'sell'));
     g.on('buy', () => this._capped('buy', 20, 'cheose', 1));
     g.on('horse:bond', () => this.addXP('gima', 40, 'bond'));
     g.on('item:remove', (e) => e.id === 'f_maljuk' && this._capped('maljuk', 2, 'gima', 5));
+    g.on('npc:intimidated', (e) => e.report && this.addXP('cheose', 10, 'threat')); // 목격자 위협 (뇌물은 wanted 가 준다)
     const rail = (e) => {
       const v = e.vehicle;
       if (isP(e.human) && (v?.vtype === 'tram' || v?.vtype === 'train') && Math.abs(v.speed || 0) > 0.5) this.addXP('gima', 8, 'rail');
@@ -246,14 +216,13 @@ class Skills {
     g.on('vehicle:exit', rail);
   }
 
-  /** 거리 경험치: 말 100 m(질주 ×1.5) · 노 80 m · 수레 100 m · 몰래 30 m */
+  /** 거리 경험치: 말 100 m(질주 ×1.5) · 노 80 m · 수레 100 m · 웅크려 안 들키고 30 m */
   update(dt, realDt, g) {
     if ((this._acc += dt) < 0.5) return;
     this._acc = 0;
     const p = g.player;
     if (!p || p.state !== 'normal') return (this._last = null);
-    const v = p.vehicle, pos = v || p;
-    const last = this._last;
+    const v = p.vehicle, pos = v || p, last = this._last;
     this._last = { x: pos.x, y: pos.y };
     if (!last) return;
     const d = Math.hypot(pos.x - last.x, pos.y - last.y);
@@ -262,7 +231,10 @@ class Skills {
       if (v.moveMode === 'horse') this._travel('horse', d * (v.ctl?.sprint ? 1.5 : 1), 100, 'gima');
       else if (v.moveMode === 'boat' && v.vtype !== 'steamer') this._travel('row', d, 80, 'gima');
       else if (RIDE_TYPES.has(v.vtype)) this._travel('cart', d, 100, 'gima');
-    } else if (!v && p.crouching && !((sys(g).wanted?.level ?? 0) > 0)) this._travel('sneak', d, 30, 'cheose', 2);
+    } else if (!v && p.crouching && !(g.sys.wanted?.level > 0)) {
+      const aw = g.sys.npcs?.awareness;
+      if (!aw || !g.nearest(p.x, p.y, 25, (e) => e.kind === 'human' && !e.isPlayer && aw(e, p) >= 0.5)) this._travel('sneak', d, 30, 'cheose', 2);
+    }
   }
 
   serialize() {

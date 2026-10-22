@@ -2,45 +2,56 @@
 // 경계는 도메인 왜곡(노이즈)으로 번지듯 자연스럽게. 엔진은 데이터 형식만 알고 특정 지명에 의존하지 않는다.
 // 성능: 칸마다 노이즈 함수를 부르지 않고, 미리 만든 칸 단위 왜곡·노이즈 배열(Int8/Uint8)을 읽는다.
 
-import { closestOnSegment, mulberry32 } from '../engine/util.js';
+import { closestOnSegment, mulberry32, polylineCumulative, pointAtDistance, closestOnPolyline } from '../engine/util.js';
 
 // ---------------------------------------------------------------- 지형 enum·표
 
 export const T = {
   VOID: 0, SEA: 1, RIVER: 2, SHALLOW: 3, MUD: 4, SAND: 5, GRASS: 6, FIELD: 7, PADDY: 8, FOREST: 9,
   MOUNTAIN: 10, ROCK: 11, ROAD: 12, MAIN_ROAD: 13, STREET: 14, YARD: 15, WALL: 16, BRIDGE: 17, RAIL: 18, PIER: 19,
+  REED: 20,
 };
-export const T_COUNT = 20;
+export const T_COUNT = 21;
 
-// [key, 이름, foot, horse, wheel, boat]  (0 = 통행 불가, 숫자 = 속도 배율)
+// 스펙 A.2: [key, 이름, foot, horse, wheel, boat, 은신 배율(작을수록 숨기 좋음), 발소리]  (0 = 통행 불가)
 const TABLE = [
-  ['VOID', '지도 밖', 0, 0, 0, 0],
-  ['SEA', '바다', 0, 0, 0, 1],
-  ['RIVER', '강', 0, 0, 0, 1],
-  ['SHALLOW', '얕은 물', 0.55, 0.6, 0, 0.7],
-  ['MUD', '갯벌', 0.5, 0.45, 0, 0],
-  ['SAND', '모래', 0.85, 0.8, 0.6, 0],
-  ['GRASS', '풀밭', 1, 1, 0.75, 0],
-  ['FIELD', '밭', 0.85, 0.8, 0.6, 0],
-  ['PADDY', '논', 0.6, 0.55, 0, 0],
-  ['FOREST', '숲', 0.8, 0.6, 0, 0],
-  ['MOUNTAIN', '산비탈', 0.65, 0.5, 0, 0],
-  ['ROCK', '바위·벼랑', 0, 0, 0, 0],
-  ['ROAD', '길', 1.05, 1.1, 1.0, 0],
-  ['MAIN_ROAD', '큰길', 1.05, 1.15, 1.1, 0],
-  ['STREET', '거리', 1.05, 1.0, 1.05, 0],
-  ['YARD', '마당', 1, 0.9, 0.9, 0],
-  ['WALL', '성벽', 0, 0, 0, 0],
-  ['BRIDGE', '다리', 1.05, 1.05, 1.0, 0],
-  ['RAIL', '철로', 0.9, 0.8, 0.5, 0],
-  ['PIER', '부두·나루', 1, 0.9, 0.9, 0.5],
+  ['VOID', '지도 밖', 0, 0, 0, 0, 1, null],
+  ['SEA', '바다', 0, 0, 0, 1, 1, 'splash'],
+  ['RIVER', '강', 0, 0, 0, 1, 1, 'splash'],
+  ['SHALLOW', '얕은 물', 0.55, 0.6, 0, 0.7, 1.0, 'water'],
+  ['MUD', '갯벌', 0.5, 0.45, 0, 0, 1.2, 'mud'],
+  ['SAND', '모래', 0.85, 0.8, 0.6, 0, 1.2, 'sand'],
+  ['GRASS', '풀밭', 1, 1, 0.75, 0, 1.0, 'grass'],
+  ['FIELD', '밭', 0.85, 0.8, 0.6, 0, 0.9, 'dirt'],
+  ['PADDY', '논', 0.6, 0.55, 0, 0, 0.85, 'mud'],
+  ['FOREST', '숲', 0.8, 0.6, 0, 0, 0.6, 'leaves'],
+  ['MOUNTAIN', '산비탈', 0.65, 0.5, 0, 0, 0.8, 'gravel'],
+  ['ROCK', '바위·벼랑', 0, 0, 0, 0, 1, null],
+  ['ROAD', '길', 1.05, 1.1, 1.0, 0, 1.1, 'dirt'],
+  ['MAIN_ROAD', '큰길', 1.05, 1.15, 1.1, 0, 1.15, 'dirt'],
+  ['STREET', '거리', 1.05, 1.0, 1.05, 0, 1.1, 'dirt'],
+  ['YARD', '마당', 1, 0.9, 0.9, 0, 1.0, 'dirt'],
+  ['WALL', '성벽', 0, 0, 0, 0, 1, null],
+  ['BRIDGE', '다리', 1.05, 1.05, 1.0, 0, 1.1, 'wood'],
+  ['RAIL', '철로', 0.9, 0.8, 0.5, 0, 1.1, 'gravel'],
+  ['PIER', '부두·나루', 1, 0.9, 0.9, 0.5, 1.0, 'wood'],
+  ['REED', '갈대밭', 0.6, 0.5, 0, 0.4, 0.45, 'reed'],
 ];
+// 스펙 A.2 효과 열 (있는 것만)
+const EFFECT = {
+  SHALLOW: { misfire: 0.15, steamerBlock: true }, MUD: { footprints: 60 }, SAND: { footprints: 30 }, FIELD: { footprints: 30 },
+  PADDY: { dike: 1 }, FOREST: { blocksSight: true, gather: 'ssari' }, MOUNTAIN: { staminaMul: 1.5 }, ROCK: { echo: true },
+  ROAD: { rainWheelMul: 0.85 }, MAIN_ROAD: { crowd: true }, STREET: { drains: true }, YARD: { private: true },
+  RAIL: { trainDeadly: true }, PIER: { boarding: true }, REED: { hideBoat: true, animals: ['water_deer', 'pheasant'] },
+};
 
-export const TERRAIN = TABLE.map(([key, name, foot, horse, wheel, boat], id) => ({
-  id, key, name, foot, horse, wheel, boat,
+export const TERRAIN = TABLE.map(([key, name, foot, horse, wheel, boat, stealth, step], id) => ({
+  id, key, name, foot, horse, wheel, boat, stealth, step,
+  swim: id === T.SEA || id === T.RIVER || id === T.SHALLOW ? 1 : 0,
   water: id === T.SEA || id === T.RIVER || id === T.SHALLOW,
   deep: id === T.SEA || id === T.RIVER,
   road: id === T.ROAD || id === T.MAIN_ROAD || id === T.STREET || id === T.BRIDGE,
+  ...(EFFECT[key] || {}),
 }));
 
 /** 모드별 통행(0/1)·속도 표. 모르는 모드는 foot 로 취급 */
@@ -66,6 +77,13 @@ const ROAD_RANK = { [T.ROAD]: 1, [T.STREET]: 2, [T.MAIN_ROAD]: 3 };
 /** 집 마당 등으로 바꿔 칠해도 되는 땅 */
 export function isSoftGround(t) {
   return t === T.GRASS || t === T.FIELD || t === T.FOREST || t === T.MOUNTAIN || t === T.SAND || t === T.YARD || t === T.PADDY;
+}
+
+/** 지도 가장자리 띠(스펙 A.1: 60 m 안쪽은 한지로 번져 사라진다). 칸 cn(0..255) 으로 경계를 번지게 → 지나갈 수 없는 칸인가 */
+export const EDGE_BAND = 60;
+export function inEdgeBand(x, y, w, h, n255) {
+  const d = Math.min(x, y, w - x, h - y);
+  return d < EDGE_BAND && d < EDGE_BAND - 16 + (n255 / 255) * 16 - 2;
 }
 
 // ---------------------------------------------------------------- 주기 노이즈 텍스처 (빠른 표본)
@@ -347,6 +365,7 @@ export class Terrain {
     this.walls = [];
     this.gates = []; // {id, name, hanja, x, y, w, angle, thickness, wall}
     this.piers = [];
+    this.platforms = []; // 승강장 {line, stop, d0, d1, inner, outer, poly}
     this.seed = 1899;
     this.tex = makeNoiseTex(this.seed);
     this.tex2 = makeNoiseTex(this.seed + 7);
@@ -381,6 +400,11 @@ export class Terrain {
     const a = arr[k], b = arr[k + 1], c = arr[k + W], d = arr[k + W + 1];
     return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
   }
+  /** 가장자리 띠(지나갈 수 없는 한지)인가 */
+  edgeVoid(x, y) {
+    const i = this.idx(x, y);
+    return i < 0 || inEdgeBand(x, y, this.w, this.h, this.cn[i]);
+  }
   heightAt(x, y) {
     return this.bil(this.height, x, y);
   }
@@ -408,13 +432,18 @@ export class Terrain {
       ['fields', '논밭을 가는 중'],
       ['rivers', '강을 흘려보내는 중'],
       ['ponds', '못을 파는 중'],
+      ['sands', '모래톱을 쌓는 중'],
+      ['reeds', '갈대를 심는 중'],
+      ['channels', '뱃길을 트는 중'],
       ['banks', '물가를 다듬는 중'],
       ['yards', '마을 마당을 다지는 중'],
       ['roads', '길을 내는 중'],
       ['bridges', '다리를 놓는 중'],
       ['rails', '철로를 까는 중'],
+      ['platforms', '승강장을 다지는 중'],
       ['piers', '나루를 세우는 중'],
       ['walls', '성벽을 쌓는 중'],
+      ['edges', '종이 끝을 번지게 하는 중'],
       ['finish', '먹을 가는 중'],
     ];
     this.timings = {};
@@ -571,7 +600,8 @@ export class Terrain {
     const M = this.map;
     if (!M.sea?.length) return;
     this.paintPolys(M.sea, 10, 2.2, () => T.SEA);
-    this.paintPolys(M.mudflats, 16, 3, (i, t) => (t === T.SEA ? T.MUD : -1));
+    // 갯벌 띠가 얇으니(20~40 m) 경계 흔들림을 작게
+    this.paintPolys(M.mudflats, 6, 2, (i, t) => (t === T.SEA ? T.MUD : -1));
     // 바다 칸 범위
     const g = this.grid, C = this.cols;
     let x0 = C, y0 = this.rows, x1 = -1, y1 = -1;
@@ -699,11 +729,17 @@ export class Terrain {
 
   step_rivers() {
     const g = this.grid, C = this.cols, c = this.cell, cl = this.cl;
-    const o = [0, 0];
+    // 모래톱(sands) 자리: 큰 강은 여기를 비워 둔다 (섬). 지류(샛강 등)는 그대로 흐른다
+    let sm = null;
+    if (this.map.sands?.length) {
+      sm = this.sandMask = new Uint8Array(g.length);
+      this.paintPolys(this.map.sands, 5, 1.5, (i) => ((sm[i] = 1), -1));
+    }
     (this.map.rivers || []).forEach((rv, ri) => {
       const pts = rv.points;
       const sh = rv.shallow ?? 6;
       const widths = rv.widths && rv.widths.length === pts.length ? rv.widths : null;
+      const wide = sm && Math.max(rv.width ?? 0, ...(widths || [0])) >= 40;
       const info = { id: rv.id, name: rv.name, hanja: rv.hanja, points: pts, width: rv.width ?? 20, shallow: sh, widths, segs: [] };
       this.rivers.push(info);
       for (let s = 0; s + 1 < pts.length; s++) {
@@ -721,7 +757,7 @@ export class Terrain {
           const j1 = (cy & 63) << 6, j2 = ((cy + 29) & 63) << 6, py0 = (cy + 0.5) * c;
           for (let cx = cx0; cx <= cx1; cx++) {
             const i = cy * C + cx, t = g[i];
-            if (t === T.RIVER || t === T.SEA) continue;
+            if (t === T.RIVER || t === T.SEA || (wide && sm[i])) continue;
             const ox = (cx + 0.5) * c + cwx[i] * a + jit[(cx & 63) | j1] * 1.2;
             const oy = py0 + cwy[i] * a + jit[((cx + 17) & 63) | j2] * 1.2;
             let u = ((ox - ax) * dx + (oy - ay) * dy) / L2;
@@ -757,6 +793,72 @@ export class Terrain {
     }
   }
 
+  /** 다각형들 경계 상자 → 칸 범위 [cx0, cy0, cx1, cy1] (pad m) */
+  _cellBox(polys, pad) {
+    const b = polyBounds(polys), c = this.cell;
+    return [Math.max(0, Math.floor((b.x0 - pad) / c)), Math.max(0, Math.floor((b.y0 - pad) / c)), Math.min(this.cols - 1, Math.ceil((b.x1 + pad) / c)), Math.min(this.rows - 1, Math.ceil((b.y1 + pad) / c))];
+  }
+
+  // 모래톱·섬(sands): 큰 강이 비워 둔 자리를 모래로, 둘레 깊은 물은 얕은 물 띠로
+  step_sands() {
+    const sm = this.sandMask;
+    if (!sm) return;
+    const g = this.grid, C = this.cols, cn = this.cn;
+    const [cx0, cy0, cx1, cy1] = this._cellBox(this.map.sands, 16);
+    for (let cy = cy0; cy <= cy1; cy++)
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const i = cy * C + cx, t = g[i];
+        if (sm[i] && !isWaterT(t) && t !== T.WALL) g[i] = T.SAND;
+      }
+    const F = this.coarseDist(flagsOf([T.SAND]), cx0, cy0, cx1, cy1, 30);
+    for (let cy = cy0; cy <= cy1; cy++)
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const i = cy * C + cx, t = g[i];
+        if ((t === T.RIVER || t === T.SEA) && this.sampleDist(F, cx, cy) < 2.5 + 4 * (cn[i] / 255)) g[i] = T.SHALLOW;
+      }
+    this.sandMask = null;
+  }
+
+  // 갈대밭(reeds): 물가 뭍·얕은 물 위
+  step_reeds() {
+    const R = this.map.reeds;
+    if (!R?.length) return;
+    const ok = flagsOf([T.GRASS, T.FIELD, T.SAND, T.MUD, T.SHALLOW, T.PADDY, T.FOREST]);
+    this.paintPolys(R, 5, 1.5, (i, t) => (ok[t] ? T.REED : -1));
+  }
+
+  // 물길 노선(증기선) 둘레 R m 는 깊은 물: 모래톱·갯벌·얕은 물에 걸려 좌초하지 않게 (A.5)
+  step_channels() {
+    const g = this.grid, C = this.cols, R = 6, c = this.cell;
+    const soft = flagsOf([T.SHALLOW, T.MUD, T.SAND, T.REED]);
+    for (const ln of this.map.lines || []) {
+      if (ln.kind !== 'water') continue;
+      let deep = T.RIVER;
+      for (let s = 0; s + 1 < ln.points.length; s++) {
+        const [ax, ay] = ln.points[s], [bx, by] = ln.points[s + 1];
+        const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 1.5));
+        for (let k = 0; k <= n; k++) {
+          const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n;
+          let sea = 0, riv = 0;
+          for (let q = 0; q < 8; q++) {
+            const t = this.at(x + Math.cos(q * 0.785) * (R + 5), y + Math.sin(q * 0.785) * (R + 5));
+            if (t === T.SEA) sea++;
+            else if (t === T.RIVER) riv++;
+          }
+          if (sea) deep = T.SEA;
+          else if (riv) deep = T.RIVER;
+          const x0 = Math.max(0, Math.floor((x - R) / c)), x1 = Math.min(C - 1, Math.floor((x + R) / c));
+          const y0 = Math.max(0, Math.floor((y - R) / c)), y1 = Math.min(this.rows - 1, Math.floor((y + R) / c));
+          for (let cy = y0; cy <= y1; cy++)
+            for (let cx = x0; cx <= x1; cx++) {
+              const px = (cx + 0.5) * c - x, py = (cy + 0.5) * c - y, i = cy * C + cx;
+              if (px * px + py * py <= R * R && soft[g[i]]) g[i] = deep;
+            }
+        }
+      }
+    }
+  }
+
   // 강변 모래톱
   step_banks() {
     if (!this.rivers.length) return;
@@ -775,13 +877,13 @@ export class Terrain {
 
   step_yards() {
     for (const s of this.map.settlements || []) {
-      const city = s.kind === 'city';
-      const rr = s.r * (city ? 0.9 : s.kind === 'camp' ? 0.8 : 0.26);
+      const city = s.kind === 'city', dense = city || (s.kind === 'town' && s.alleys), camp = s.kind === 'camp';
+      const rr = s.r * (city ? 0.9 : dense ? 0.75 : camp ? 0.8 : 0.26);
       const cn = this.cn;
-      this.paintCircle(s.x, s.y, rr, city ? 26 : 9, (i, t, cx, cy, dn) => {
-        if (t !== T.GRASS && t !== T.FIELD && t !== T.FOREST && t !== T.SAND) return -1;
+      this.paintCircle(s.x, s.y, rr, dense ? 26 : 9, (i, t, cx, cy, dn) => {
+        if (t !== T.GRASS && t !== T.FIELD && t !== T.FOREST && t !== T.SAND && !(camp && t === T.PADDY)) return -1;
         const n = cn[i] / 255;
-        return n > (city ? 0.1 + dn * 0.22 : 0.36 + dn * 0.34) ? T.YARD : -1;
+        return n > (dense ? 0.1 + dn * 0.22 : camp ? 0.12 + dn * 0.3 : 0.36 + dn * 0.34) ? T.YARD : -1;
       });
     }
   }
@@ -898,6 +1000,33 @@ export class Terrain {
     }
   }
 
+  // 승강장: 정차점 기준 선로 북쪽 띠 (A.4: 선로 중심에서 off0~off1 m, 길이 len m)
+  step_platforms() {
+    for (const ln of this.map.lines || []) {
+      const pf = ln.platform;
+      if (!pf || ln.kind !== 'rail') continue;
+      const pts = ln.points, cum = polylineCumulative(pts), L = cum[cum.length - 1];
+      const stops = pf.stops ? (ln.stops || []).filter((s) => pf.stops.includes(s.id)) : ln.stops || [];
+      for (const s of stops) {
+        const sd = s.d ?? closestOnPolyline(pts, s.x, s.y, cum).d;
+        const d0 = Math.max(0, sd - pf.len / 2), d1 = Math.min(L, sd + pf.len / 2);
+        const inner = [], outer = [];
+        for (let d = d0; d <= d1 + 0.01; d += 0.5) {
+          const p = pointAtDistance(pts, Math.min(d, d1), cum);
+          let nx = -Math.sin(p.angle), ny = Math.cos(p.angle);
+          if (ny > 0) (nx = -nx), (ny = -ny); // 북쪽
+          inner.push([p.x + nx * pf.off0, p.y + ny * pf.off0]);
+          outer.push([p.x + nx * pf.off1, p.y + ny * pf.off1]);
+          for (let o = pf.off0; o <= pf.off1 + 0.01; o += 0.6) {
+            const i = this.idx(p.x + nx * o, p.y + ny * o);
+            if (i >= 0 && isSoftGround(this.grid[i])) this.grid[i] = T.STREET;
+          }
+        }
+        this.platforms.push({ line: ln.id, stop: s.id, name: s.name, d0, d1, inner, outer, poly: inner.concat(outer.slice().reverse()) });
+      }
+    }
+  }
+
   step_piers() {
     const c = this.cell, C = this.cols, g = this.grid;
     for (const b of this.map.buildings || []) {
@@ -930,8 +1059,12 @@ export class Terrain {
           const c = closestOnSegment(gt.x, gt.y, pts[s][0], pts[s][1], pts[s + 1][0], pts[s + 1][1]);
           if (!best || c.dist < best.dist) best = { ...c, s };
         }
-        const a = pts[best.s], b = pts[best.s + 1];
-        const g = { id: gt.id, name: gt.name, hanja: gt.hanja, x: best.x, y: best.y, w: gt.w ?? 8, angle: Math.atan2(b[1] - a[1], b[0] - a[0]), thickness: th, wall: wall.id, wallName: wall.name };
+        let a = pts[best.s], b = pts[best.s + 1];
+        // 꼭짓점 위 대문은 양옆 성벽의 가운데 방향으로 (꺾인 자리에 문루가 비뚤지 않게)
+        const n = pts.length - (closed ? 1 : 0);
+        if (Math.hypot(b[0] - best.x, b[1] - best.y) < 0.6 && (closed || best.s + 2 < pts.length)) b = pts[(best.s + 2) % n];
+        else if (Math.hypot(a[0] - best.x, a[1] - best.y) < 0.6 && (closed || best.s > 0)) a = pts[(best.s - 1 + n) % n];
+        const g = { id: gt.id, name: gt.name, hanja: gt.hanja, x: best.x, y: best.y, w: gt.w ?? 8, angle: Math.atan2(b[1] - a[1], b[0] - a[0]), thickness: th, wall: wall.id, wallName: wall.name, locked: !!gt.locked };
         this.gates.push(g);
         return g;
       });
@@ -986,6 +1119,23 @@ export class Terrain {
         }
       }
       this.walls.push({ id: wall.id, name: wall.name, points: pts, thickness: th, gates });
+    }
+  }
+
+  // 가장자리 바위 띠 (A.1: 북한산 y < 80, 관악산 남쪽 y > 2350). 양 끝은 얕아지고 경계는 노이즈로 들쭉날쭉
+  step_edges() {
+    const g = this.grid, C = this.cols, c = this.cell, cn = this.cn;
+    for (const e of this.map.edgeRock || []) {
+      const north = e.side !== 's';
+      const span = Math.max(1, e.x1 - e.x0);
+      for (let cx = Math.max(0, Math.floor(e.x0 / c)); cx <= Math.min(C - 1, Math.floor(e.x1 / c)); cx++) {
+        const u = ((cx + 0.5) * c - e.x0) / span, taper = Math.min(1, u * 5, (1 - u) * 5);
+        const depth = e.d * taper, n = Math.min(this.rows, Math.ceil((depth + 12) / c));
+        for (let k = 0; k < n; k++) {
+          const cy = north ? k : this.rows - 1 - k, i = cy * C + cx;
+          if ((k + 0.5) * c < depth - 8 + (cn[i] / 255) * 20 && !isWaterT(g[i])) g[i] = T.ROCK;
+        }
+      }
     }
   }
 

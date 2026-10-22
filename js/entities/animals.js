@@ -1,13 +1,12 @@
 // 동물 [사람]: 7종 SPECIES(E.1), 상태기계(풀뜯기·배회·경계·도망·공격)·무리·냄새·소리 반응, 가죽 품질, 그리기(B.5). game.sys.animals
-//   spawn(speciesId, x, y, opts) → Animal    (추가) spawnPack(speciesId, x, y, n, opts) → Animal[]   alert(x, y, r, kind)   list()
-//   Animal: kind='animal', species, spec, hp, state, dead, skinned, quality(1~3), hitTest(px, py, r), (추가) isHead(px, py)
-//   가죽 벗기기는 loot.js 가 interaction provider 로 (animal.dead, skinned, species, quality, spec.pelt/meat/extra 를 읽음)
+//   spawn(speciesId, x, y, opts) → Animal    (추가) spawnPack(speciesId, x, y, n, opts) → Animal[]   alert(x, y, r, kind)   list()   activeNow(spec, hour)
+//   Animal: kind='animal', species, spec, hp, state, dead, skinned, quality(1~3), length·width(몸 L×W), hitTest(px, py, r), (추가) isHead(px, py)
+//   가죽 벗기기는 loot.js 가 interaction provider 로 (animal.dead, skinned, species, quality, spec.meat/extra/size 를 읽음)
 
 import { Entity, LAYER } from '../engine/entity.js';
 import { moveCircle } from '../engine/physics.js';
 import { PAL } from '../engine/palette.js';
 import { angleWrap, clamp, rand } from '../engine/util.js';
-import { WEATHER_SIGHT } from './npc.js';
 
 // active: day 6~19, dawn 4~7, night 19~5 / temper: timid 달아남, reed 갈대로, flyer 날아감, charge 돌진, pack 무리 사냥, stalker 덮침
 export const SPECIES = {
@@ -20,6 +19,7 @@ export const SPECIES = {
   tiger: { id: 'tiger', name: '범', hp: 220, len: 2.0, wid: 0.6, walk: 2.0, run: 11.0, sight: [40, 40], smell: 40, temper: 'stalker', stalkR: 30, attack: { dmg: 45, cool: 2, knock: 2, unblockable: true }, group: [1, 1], active: ['night'], size: 'L', pelt: 'pelt_tiger', price: 600, meat: 4, proper: ['w_matchlock', 'w_rifle'], color: PAL.tiger, head: 0.2, tail: 0.9, big: true },
 };
 const NOT_SHOT = new Set(['melee', 'fist', 'trample', 'fall', 'animal', 'fire', 'drown']);
+const WEATHER_DETECT = { rain: 0.8, fog: 0.5, storm: 0.6, snow: 0.7 }; // G.5 동물 감지 배수
 
 /** 지금 시각에 활동하는 종인가 */
 export function activeNow(spec, hour) {
@@ -41,31 +41,14 @@ export function peltQuality(spec, hits) {
 }
 
 const isNightHour = (h) => h >= 20 || h < 4;
+let GAME = null;
 
 export class Animal extends Entity {
   constructor(spec, x, y, opts = {}) {
     super({ x, y, radius: clamp(spec.wid * 0.7, 0.14, 0.42), mass: spec.big ? 3 : spec.size === 'S' ? 0.3 : 1.2, hp: spec.hp, angle: rand.range(-Math.PI, Math.PI) });
-    this.kind = 'animal';
-    this.species = spec.id;
-    this.spec = spec;
-    this.name = spec.name;
-    this.state = 'graze';
-    this.stateT = rand.range(1, 6);
-    this.dead = false;
-    this.skinned = false;
-    this.quality = 0;
-    this.hits = [];
-    this.home = { x, y };
-    this.pack = opts.pack || null;
-    this.target = null; // 공격 대상
-    this.threat = null; // 피할 대상 (엔티티 또는 {x,y})
-    this.goal = null;
-    this.atkCd = rand.range(0.5, 1.5);
-    this.phase = rand.range(0, 6);
-    this.speedNow = 0;
-    this.moveMode = 'foot';
-    this.senseT = rand.range(0, 0.3);
-    this.slot = opts.slot || 0;
+    Object.assign(this, { kind: 'animal', species: spec.id, spec, name: spec.name, length: spec.len, width: spec.wid, state: 'graze', stateT: rand.range(1, 6) });
+    Object.assign(this, { dead: false, skinned: false, quality: 0, hits: [], home: { x, y }, pack: opts.pack || null, target: null, threat: null, goal: null });
+    Object.assign(this, { atkCd: rand.range(0.5, 1.5), phase: rand.range(0, 6), speedNow: 0, moveMode: 'foot', senseT: rand.range(0, 0.3), slot: opts.slot || 0 });
     this.tags.add('animal');
     this.tags.add(spec.id);
     if (opts.zone) this.data.zone = opts.zone;
@@ -85,26 +68,18 @@ export class Animal extends Entity {
   }
   /** 머리 = 몸 앞쪽 30% (G.2) */
   isHead(px, py) {
-    const [lx] = this.local(px, py);
-    return this.hitTest(px, py, 0.12) && lx > this.spec.len / 2 - this.spec.len * 0.3;
+    return this.hitTest(px, py, 0.12) && this.local(px, py)[0] > this.spec.len * 0.2;
   }
 
   damage(amount, info = {}, game) {
     if (this.dead) return;
     let head = !!info.headshot;
     // 전투 시스템이 머리 판정을 안 했으면 맞은 자리로 판정 (피해 ×3)
-    if (info.headshot == null && (info.kind === 'bullet' || info.kind === 'arrow') && Number.isFinite(info.x) && this.isHead(info.x, info.y)) {
-      head = true;
-      amount *= 3;
-    }
+    if (info.headshot == null && (info.kind === 'bullet' || info.kind === 'arrow') && Number.isFinite(info.x) && this.isHead(info.x, info.y)) (head = true), (amount *= 3);
     this.hits.push({ weapon: info.weapon || null, kind: info.kind || 'bullet', head });
     this.hp -= amount;
     game?.events.emit('damage', { target: this, amount, ...info, headshot: head });
-    if (this.hp <= 0) {
-      this.hp = 0;
-      this.die({ ...info, headshot: head }, game);
-      return;
-    }
+    if (this.hp <= 0) return (this.hp = 0), this.die({ ...info, headshot: head }, game);
     let src = info.source || null;
     if (src?.kind === 'vehicle') src = src.driver || src;
     const t = this.spec.temper;
@@ -114,13 +89,8 @@ export class Animal extends Entity {
   }
   die(info = {}, game) {
     if (this.dead) return;
-    this.dead = true;
-    this.state = 'dead';
-    this.solid = false;
-    this.layer = LAYER.LOW;
-    this.vx = this.vy = 0;
+    Object.assign(this, { dead: true, state: 'dead', solid: false, layer: LAYER.LOW, vx: 0, vy: 0, deathAngle: this.angle });
     this.quality = peltQuality(this.spec, this.hits);
-    this.deathAngle = this.angle;
     if (this.pack) {
       const m = this.pack.members;
       m.splice(m.indexOf(this), 1);
@@ -135,25 +105,16 @@ export class Animal extends Entity {
     this.threat = src;
     this.target = null;
     if (this.spec.temper === 'flyer') {
-      this.state = 'fly';
-      this.stateT = this.spec.fleeDist / this.spec.run;
-      this.moveMode = 'ghost';
-      game_sfx(this, 'bird');
-    } else {
-      this.state = 'flee';
-      this.stateT = 30;
-      this.fleeStart = { x: this.x, y: this.y };
-    }
+      Object.assign(this, { state: 'fly', stateT: this.spec.fleeDist / this.spec.run, moveMode: 'ghost' });
+      GAME?.sfx?.('bird', { x: this.x, y: this.y });
+    } else Object.assign(this, { state: 'flee', stateT: 30, fleeStart: { x: this.x, y: this.y } });
     if (this.pack) for (const o of this.pack.members) if (o !== this && o.state !== 'flee' && o.state !== 'fly' && !o.dead) o.fleeFrom(src);
   }
   attackStart(t, game) {
     if (!t || this.dead) return;
     const sp = this.spec;
-    if (this.state !== 'stalk' && this.state !== 'charge' && this.state !== 'circle' && sp.temper === 'stalker') game?.sfx?.('tiger', { x: this.x, y: this.y });
-    this.target = t;
-    this.threat = null;
-    this.state = sp.temper === 'stalker' ? 'stalk' : sp.temper === 'pack' ? 'circle' : 'charge';
-    this.stateT = 0;
+    if (sp.temper === 'stalker' && !['stalk', 'charge', 'recover'].includes(this.state)) game?.sfx?.('tiger', { x: this.x, y: this.y });
+    Object.assign(this, { target: t, threat: null, state: sp.temper === 'stalker' ? 'stalk' : sp.temper === 'pack' ? 'circle' : 'charge', stateT: 0 });
     if (sp.temper === 'charge') this.chargeAt(t);
     if (this.pack && sp.temper === 'pack') {
       this.pack.target = t;
@@ -161,13 +122,10 @@ export class Animal extends Entity {
     }
   }
   chargeAt(t) {
-    this.state = 'charge';
-    this.stateT = 1.6;
-    this.dir = Math.atan2(t.y - this.y, t.x - this.x);
+    Object.assign(this, { state: 'charge', stateT: 1.6, dir: Math.atan2(t.y - this.y, t.x - this.x) });
   }
   strike(t, game) {
-    const a = this.spec.attack;
-    const dx = t.x - this.x, dy = t.y - this.y, d = Math.hypot(dx, dy) || 1;
+    const a = this.spec.attack, dx = t.x - this.x, dy = t.y - this.y, d = Math.hypot(dx, dy) || 1;
     const victim = t.vehicle && t.vehicle.damage ? t.vehicle : t; // 말 탄 사람이면 말을 문다
     victim.damage?.(a.dmg, { source: this, weapon: this.species, kind: 'animal', x: t.x, y: t.y, headshot: false, unblockable: !!a.unblockable }, game);
     if (a.knock && victim === t && t.state === 'normal') t.knockDown?.(dx / d, dy / d, 3, a.knock);
@@ -175,54 +133,41 @@ export class Animal extends Entity {
     game?.sfx?.('hit', { x: t.x, y: t.y, pitch: 0.7 });
   }
 
-  /** 이 사람을 알아챘는가: 시야·냄새(맞바람)·소리 */
+  /** 이 사람을 알아챘는가: 시야(웅크리면 ×0.5)·냄새(맞바람 60°)·소리 */
   detects(p, game) {
     if (!p || p.state === 'dead' || p.hidden) return false;
-    const dx = this.x - p.x, dy = this.y - p.y, d = Math.hypot(dx, dy);
-    const sp = this.spec, night = isNightHour(game.hour);
-    const w = game.sys.time?.weather || 'clear';
-    let sight = sp.sight[night ? 1 : 0] * (WEATHER_SIGHT[w] ?? 1) * (w === 'rain' ? 0.8 : 1) * (p.crouching ? 0.5 : 1);
+    const dx = this.x - p.x, dy = this.y - p.y, d = Math.hypot(dx, dy), sp = this.spec;
+    let sight = sp.sight[isNightHour(game.hour) ? 1 : 0] * (WEATHER_DETECT[game.sys.time?.weather] ?? 1) * (p.crouching ? 0.5 : 1);
     if (p.isPlayer) sight *= game.sys.skills?.mod?.('animalDetect', 1) ?? 1;
     if (d < sight) return true;
     const wind = game.sys.time?.wind;
     if (wind && wind.strength > 0.05 && d < sp.smell && Math.abs(angleWrap(Math.atan2(dy, dx) - wind.angle)) < Math.PI / 3) return true;
-    const n = game.sys.npcs?.noise?.(p) ?? (p.speedNow > 3 ? 12 : p.speedNow > 0.3 && !p.crouching ? 6 : 0);
-    return d < n;
+    return d < (game.sys.npcs?.noise?.(p) ?? (p.speedNow > 3 ? 12 : p.speedNow > 0.3 && !p.crouching ? 6 : 0));
   }
 
   sense(game) {
-    const p = game.player;
-    const sp = this.spec;
-    const night = isNightHour(game.hour);
+    const p = game.player, sp = this.spec;
     if (this.state === 'flee' || this.state === 'fly' || this.target) return;
     // 늑대(밤)·범: 가까운 사람을 노린다
-    if ((sp.temper === 'pack' && night) || sp.temper === 'stalker') {
-      const R = sp.temper === 'pack' ? sp.packR : sp.stalkR;
-      const prey = game.nearest(this.x, this.y, R, (e) => e.kind === 'human' && e.state !== 'dead' && !e.hidden);
+    if ((sp.temper === 'pack' && isNightHour(game.hour)) || sp.temper === 'stalker') {
+      const prey = game.nearest(this.x, this.y, sp.temper === 'pack' ? sp.packR : sp.stalkR, (e) => e.kind === 'human' && e.state !== 'dead' && !e.hidden);
       if (prey && (prey !== p || this.detects(p, game))) return this.attackStart(prey, game);
     }
     if (!p || !this.detects(p, game)) return;
-    const d = Math.hypot(p.x - this.x, p.y - this.y);
-    if (sp.temper === 'charge' && d < sp.chargeR) return this.attackStart(p, game);
+    if (sp.temper === 'charge' && Math.hypot(p.x - this.x, p.y - this.y) < sp.chargeR) return this.attackStart(p, game);
     if (sp.temper === 'stalker') return;
-    if (sp.temper === 'charge' && this.state !== 'alert') {
-      this.state = 'alert';
-      this.stateT = 1.2;
-      this.threat = p;
-      return;
-    }
+    if (sp.temper === 'charge' && this.state !== 'alert') return void Object.assign(this, { state: 'alert', stateT: 1.2, threat: p });
     this.fleeFrom(p);
   }
 
   go(ang, speed, dt, game) {
-    const tvx = Math.cos(ang) * speed, tvy = Math.sin(ang) * speed;
     const k = Math.min(1, dt * (speed > 4 ? 5 : 8));
-    this.vx += (tvx - this.vx) * k;
-    this.vy += (tvy - this.vy) * k;
+    this.vx += (Math.cos(ang) * speed - this.vx) * k;
+    this.vy += (Math.sin(ang) * speed - this.vy) * k;
     const res = moveCircle(game.world, this, this.vx * dt, this.vy * dt, this.moveMode);
     this.speedNow = Math.hypot(this.vx, this.vy);
     if (this.speedNow > 0.1) this.angle = Math.atan2(this.vy, this.vx);
-    return res.hit;
+    return res?.hit;
   }
   halt(dt, game) {
     this.vx *= Math.pow(0.01, dt);
@@ -230,75 +175,58 @@ export class Animal extends Entity {
     moveCircle(game.world, this, this.vx * dt, this.vy * dt, this.moveMode);
     this.speedNow = Math.hypot(this.vx, this.vy);
   }
+  toward(g, speed, dt, game) {
+    return this.go(Math.atan2(g.y - this.y, g.x - this.x), speed, dt, game);
+  }
+  rest(t0, t1) {
+    Object.assign(this, { state: 'graze', stateT: rand.range(t0, t1), goal: null });
+  }
 
   update(dt, game) {
     if (this.dead) return;
     const sp = this.spec;
     this.phase += dt * (1 + this.speedNow * 2.2);
     if (this.atkCd > 0) this.atkCd -= dt;
-    if ((this.senseT -= dt) <= 0) {
-      this.senseT = 0.25;
-      this.sense(game);
-    }
+    if ((this.senseT -= dt) <= 0) (this.senseT = 0.25), this.sense(game);
     this.stateT -= dt;
     const t = this.target;
-    if (t && (t.state === 'dead' || t.alive === false || t.hidden || Math.hypot(t.x - this.x, t.y - this.y) > 60)) {
-      this.target = null;
-      this.state = 'wander';
-      this.goal = null;
-    }
+    if (t && (t.state === 'dead' || t.alive === false || t.hidden || Math.hypot(t.x - this.x, t.y - this.y) > 60)) Object.assign(this, { target: null, state: 'wander', goal: null });
+    const d = t ? Math.hypot(t.x - this.x, t.y - this.y) : 0;
     switch (this.state) {
       case 'graze':
         this.halt(dt, game);
-        if (this.stateT <= 0) {
-          this.state = 'wander';
-          this.goal = null;
-        }
+        if (this.stateT <= 0) Object.assign(this, { state: 'wander', goal: null });
         break;
       case 'wander': {
         const lead = this.pack?.members[0];
         if (lead && lead !== this && !lead.dead) {
-          const d = Math.hypot(lead.x - this.x, lead.y - this.y);
-          if (d > 4) this.go(Math.atan2(lead.y - this.y, lead.x - this.x), sp.walk * (d > 10 ? 2 : 1), dt, game);
+          // 무리: 우두머리 곁을 따른다
+          const dl = Math.hypot(lead.x - this.x, lead.y - this.y);
+          if (dl > 4) this.toward(lead, sp.walk * (dl > 10 ? 2 : 1), dt, game);
           else this.halt(dt, game);
-          if (this.stateT <= 0 && d < 4) {
-            this.state = 'graze';
-            this.stateT = rand.range(2, 6);
-          }
+          if (this.stateT <= 0 && dl < 4) this.rest(2, 6);
           break;
         }
         if (!this.goal) this.goal = game.world?.randomPassableNear?.(this.home.x, this.home.y, 15, 'foot') || { x: this.home.x, y: this.home.y };
-        const g = this.goal, d = Math.hypot(g.x - this.x, g.y - this.y);
-        if (d < 0.8 || this.go(Math.atan2(g.y - this.y, g.x - this.x), sp.walk, dt, game) || this.stateT < -20) {
-          this.goal = null;
-          this.state = 'graze';
-          this.stateT = rand.range(3, 9);
-        }
-        break;
-      }
-      case 'alert': {
-        this.halt(dt, game);
-        const th = this.threat;
-        if (th) this.angle = Math.atan2(th.y - this.y, th.x - this.x);
-        if (this.stateT <= 0) this.fleeFrom(th); // 멧돼지: 멀면 피해 간다
-        break;
-      }
-      case 'investigate': {
         const g = this.goal;
-        if (!g || this.stateT <= 0 || Math.hypot(g.x - this.x, g.y - this.y) < 3) {
-          this.state = 'graze';
-          this.stateT = rand.range(2, 5);
-        } else this.go(Math.atan2(g.y - this.y, g.x - this.x), sp.walk * 1.5, dt, game);
+        if (Math.hypot(g.x - this.x, g.y - this.y) < 0.8 || this.toward(g, sp.walk, dt, game) || this.stateT < -20) this.rest(3, 9);
         break;
       }
+      case 'alert': // 멧돼지: 멀면 노려보다 피해 간다
+        this.halt(dt, game);
+        if (this.threat) this.angle = Math.atan2(this.threat.y - this.y, this.threat.x - this.x);
+        if (this.stateT <= 0) this.fleeFrom(this.threat);
+        break;
+      case 'investigate': // 범·멧돼지: 총소리 쪽으로
+        if (!this.goal || this.stateT <= 0 || Math.hypot(this.goal.x - this.x, this.goal.y - this.y) < 3) this.rest(2, 5);
+        else this.toward(this.goal, sp.walk * 1.5, dt, game);
+        break;
       case 'flee':
       case 'fly': {
-        const th = this.threat || this;
-        const fs = this.fleeStart || this.home;
+        const th = this.threat || this, fs = this.fleeStart || this.home, w = game.world;
         let ang = Math.atan2(this.y - th.y, this.x - th.x);
-        if (sp.temper === 'reed' && game.world?.T?.REED != null) {
+        if (sp.temper === 'reed' && w?.T?.REED != null) {
           // 고라니: 가까운 갈대밭 쪽으로
-          const w = game.world;
           for (let i = 0; i < 4; i++) {
             const a = ang + (i - 1.5) * 0.5;
             if (w.terrainAt(this.x + Math.cos(a) * 12, this.y + Math.sin(a) * 12) === w.T.REED) {
@@ -312,69 +240,46 @@ export class Animal extends Entity {
         const far = Math.hypot(this.x - fs.x, this.y - fs.y) > sp.fleeDist || Math.hypot(this.x - th.x, this.y - th.y) > Math.max(60, sp.sight[0] * 2);
         if (this.stateT <= 0 || (this.state === 'flee' && far)) {
           if (this.state === 'fly') {
+            if (w && !w.passable(this.x, this.y, 'foot')) break; // 물·건물 위면 조금 더 난다
             this.moveMode = 'foot';
-            if (!game.world || game.world.passable(this.x, this.y, 'foot')) this.state = 'graze';
-            else break; // 물·건물 위면 조금 더 난다
           }
-          this.state = 'graze';
-          this.stateT = rand.range(3, 8);
-          this.home = { x: this.x, y: this.y };
-          this.threat = null;
+          this.rest(3, 8);
+          Object.assign(this, { home: { x: this.x, y: this.y }, threat: null });
         }
         break;
       }
-      case 'charge': {
-        // 멧돼지·범 돌진: 정한 방향으로 곧게
-        const spd = sp.charge || sp.run;
-        if (this.go(this.dir ?? this.angle, spd, dt, game)) this.stateT = 0;
-        if (t && this.atkCd <= 0 && Math.hypot(t.x - this.x, t.y - this.y) < sp.len / 2 + 0.7) this.strike(t, game);
-        if (this.stateT <= 0) {
-          this.state = 'recover';
-          this.stateT = sp.temper === 'stalker' ? 1.5 : 1.2;
-        }
+      case 'charge': // 멧돼지·범 돌진: 정한 방향으로 곧게
+        if (this.go(this.dir ?? this.angle, sp.charge || sp.run, dt, game)) this.stateT = 0;
+        if (t && this.atkCd <= 0 && d < sp.len / 2 + 0.7) this.strike(t, game);
+        if (this.stateT <= 0) Object.assign(this, { state: 'recover', stateT: sp.temper === 'stalker' ? 1.5 : 1.2 });
         break;
-      }
       case 'recover':
         this.halt(dt, game);
-        if (this.stateT <= 0) {
-          if (t && Math.hypot(t.x - this.x, t.y - this.y) < 30) sp.temper === 'stalker' ? (this.state = 'stalk') : this.chargeAt(t);
-          else {
-            this.state = 'wander';
-            this.target = null;
-          }
-        }
+        if (this.stateT > 0) break;
+        if (t && d < 30) sp.temper === 'stalker' ? (this.state = 'stalk') : this.chargeAt(t);
+        else Object.assign(this, { state: 'wander', target: null });
         break;
-      case 'stalk': {
-        // 범: 낮게 다가오다 10 m 안에서 덮친다
+      case 'stalk': // 범: 낮게 다가오다 10 m 안에서 덮친다. 많이 다치면 물러난다
         if (!t) break;
-        const d = Math.hypot(t.x - this.x, t.y - this.y);
-        if (this.hp < sp.hp * 0.25) {
-          this.fleeFrom(t);
-          break;
-        }
-        if (d < 10 && this.atkCd <= 0) this.chargeAt(t);
-        else this.go(Math.atan2(t.y - this.y, t.x - this.x), sp.walk, dt, game);
+        if (this.hp < sp.hp * 0.25) this.fleeFrom(t);
+        else if (d < 10 && this.atkCd <= 0) this.chargeAt(t);
+        else this.toward(t, sp.walk, dt, game);
         break;
-      }
       case 'circle': {
-        // 늑대: 둘러싸고 번갈아 문다
+        // 늑대: 둘러싸고 번갈아 문다. 낮이면 (맞지 않은 한) 물러난다
         if (!t) break;
-        const d = Math.hypot(t.x - this.x, t.y - this.y);
-        if (!isNightHour(game.hour) && this.hits.length === 0) {
+        if (!isNightHour(game.hour) && !this.hits.length) {
           this.fleeFrom(t);
           break;
         }
         if (this.lunge) {
-          this.go(Math.atan2(t.y - this.y, t.x - this.x), sp.run, dt, game);
-          if (d < sp.len / 2 + 0.6) {
-            this.strike(t, game);
-            this.lunge = false;
-          } else if (d > 14) this.lunge = false;
+          this.toward(t, sp.run, dt, game);
+          if (d < sp.len / 2 + 0.6) (this.lunge = false), this.strike(t, game);
+          else if (d > 14) this.lunge = false;
         } else {
-          const n = this.pack?.members.length || 1;
-          const a = (this.slot / n) * Math.PI * 2 + game.time * 0.35;
-          const gx = t.x + Math.cos(a) * 6, gy = t.y + Math.sin(a) * 6;
-          this.go(Math.atan2(gy - this.y, gx - this.x), Math.hypot(gx - this.x, gy - this.y) > 2 ? sp.run * 0.6 : sp.walk, dt, game);
+          const a = (this.slot / (this.pack?.members.length || 1)) * Math.PI * 2 + game.time * 0.35;
+          const g = { x: t.x + Math.cos(a) * 6, y: t.y + Math.sin(a) * 6 };
+          this.toward(g, Math.hypot(g.x - this.x, g.y - this.y) > 2 ? sp.run * 0.6 : sp.walk, dt, game);
           if (this.atkCd <= 0 && Math.random() < dt * 0.8) this.lunge = true;
         }
         break;
@@ -385,113 +290,83 @@ export class Animal extends Entity {
   }
 
   // ---- 그리기 (B.5): 몸통 타원 + 머리 원 + 꼬리 획 + 다리 4획
-  draw(ctx, game) {
-    const sp = this.spec, hl = sp.len / 2, hw = sp.wid / 2;
+  draw(ctx) {
+    const sp = this.spec, hl = sp.len / 2, hw = sp.wid / 2, ink = PAL.ink;
+    const ell = (x, y, rx, ry, fill, stroke) => {
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      if (fill) (ctx.fillStyle = fill), ctx.fill();
+      if (stroke) ctx.stroke();
+    };
     ctx.save();
     ctx.translate(this.x, this.y);
     if (this.dead) {
-      ctx.fillStyle = 'rgba(70,26,20,0.28)';
-      ctx.beginPath();
-      ctx.ellipse(0.1, 0.05, hl * 1.1 + 0.2, hw + 0.3, this.deathAngle || 0, 0, Math.PI * 2);
-      ctx.fill();
+      // 먹 번짐 + 옆으로 누운 몸 (벗긴 뒤엔 붉은 고깃덩이)
       ctx.rotate(this.deathAngle || 0);
+      ell(0.1, 0.05, hl * 1.1 + 0.2, hw + 0.3, 'rgba(70,26,20,0.28)');
       ctx.scale(1, 0.75);
       if (this.skinned) {
-        ctx.fillStyle = '#8a4a3a';
-        ctx.strokeStyle = PAL.ink;
-        ctx.lineWidth = 0.03;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, hl * 0.8, hw * 0.8, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-        return;
+        Object.assign(ctx, { strokeStyle: ink, lineWidth: 0.03 });
+        ell(0, 0, hl * 0.8, hw * 0.8, '#8a4a3a', true);
+        return void ctx.restore();
       }
     } else {
-      ctx.fillStyle = 'rgba(29,27,24,0.15)';
-      ctx.beginPath();
-      ctx.ellipse(0.08, 0.1, hl + 0.05, hw + 0.05, this.angle, 0, Math.PI * 2);
-      ctx.fill();
       ctx.rotate(this.angle);
+      ell(0.08, 0.1, hl + 0.05, hw + 0.05, 'rgba(29,27,24,0.15)'); // 그림자
     }
-    const lw = sp.size === 'S' ? 0.025 : 0.04;
-    ctx.strokeStyle = PAL.ink;
-    ctx.lineWidth = lw;
-    ctx.lineCap = 'round';
-    const run = Math.min(1, this.speedNow / 2.5);
-    // 다리 4획 (날 때는 날개)
+    const lw = sp.size === 'S' ? 0.025 : 0.04, run = Math.min(1, this.speedNow / 2.5);
+    Object.assign(ctx, { strokeStyle: ink, lineWidth: lw, lineCap: 'round' });
     if (sp.bird && this.state === 'fly') {
+      // 날개짓
       const f = Math.sin(this.phase * 6) * 0.5 + 0.5;
-      ctx.fillStyle = sp.color;
-      for (const s of [-1, 1]) {
-        ctx.beginPath();
-        ctx.ellipse(0, s * (hw + 0.12 * f), 0.12, 0.05 + 0.1 * f, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
+      for (const s of [-1, 1]) ell(0, s * (hw + 0.12 * f), 0.12, 0.05 + 0.1 * f, sp.color, true);
     } else {
+      // 다리 4획 (말 다리 위상 오프셋을 빌림)
       ctx.beginPath();
-      const OFF = [0.25, 0.75, 0, 0.5];
       let i = 0;
       for (const fx of [hl * 0.55, -hl * 0.55])
         for (const s of [-1, 1]) {
-          const sw = this.dead ? 0.1 : Math.sin(this.phase * 3 + OFF[i++] * 6.283) * (0.06 + 0.16 * run) * sp.len;
+          const sw = this.dead ? 0.1 : Math.sin(this.phase * 3 + [0.25, 0.75, 0, 0.5][i++] * 6.283) * (0.06 + 0.16 * run) * sp.len;
           ctx.moveTo(fx, s * hw * 0.6);
           ctx.lineTo(fx + sw, s * (hw + 0.1 * sp.len));
         }
       ctx.stroke();
     }
     // 꼬리
-    ctx.lineWidth = sp.id === 'fox' || sp.id === 'wolf' ? lw * 2.5 : lw * 1.2;
-    ctx.strokeStyle = sp.id === 'pheasant' ? '#6a4a2a' : PAL.ink2;
+    const wag = Math.sin(this.phase * 0.7);
+    Object.assign(ctx, { lineWidth: sp.id === 'fox' || sp.id === 'wolf' ? lw * 2.5 : lw * 1.2, strokeStyle: sp.id === 'pheasant' ? '#6a4a2a' : PAL.ink2 });
     ctx.beginPath();
     ctx.moveTo(-hl * 0.9, 0);
-    ctx.quadraticCurveTo(-hl - sp.tail * 0.6, Math.sin(this.phase * 0.7) * 0.06, -hl - sp.tail, Math.sin(this.phase * 0.7 + 1) * sp.tail * 0.25);
+    ctx.quadraticCurveTo(-hl - sp.tail * 0.6, wag * 0.06, -hl - sp.tail, Math.sin(this.phase * 0.7 + 1) * sp.tail * 0.25);
     ctx.stroke();
     // 몸통
-    ctx.lineWidth = lw;
-    ctx.strokeStyle = PAL.ink;
-    ctx.fillStyle = sp.color;
+    Object.assign(ctx, { lineWidth: lw, strokeStyle: ink });
+    ell(0, 0, hl, hw, sp.color, true);
     ctx.beginPath();
-    ctx.ellipse(0, 0, hl, hw, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
     if (sp.id === 'tiger') {
       // 먹 줄무늬 9획
-      ctx.strokeStyle = 'rgba(29,27,24,0.85)';
-      ctx.lineWidth = 0.045;
-      ctx.beginPath();
+      Object.assign(ctx, { strokeStyle: 'rgba(29,27,24,0.85)', lineWidth: 0.045 });
       for (let k = 0; k < 9; k++) {
         const x = -hl * 0.8 + (k * hl * 1.5) / 8, j = ((k * 37) % 5) * 0.012;
         ctx.moveTo(x - 0.04, -hw * 0.9);
         ctx.quadraticCurveTo(x + 0.06 + j, 0, x - 0.02, hw * 0.9);
       }
       ctx.stroke();
-    } else if (sp.id === 'pheasant') {
-      ctx.fillStyle = '#3f6a5a';
-      ctx.beginPath();
-      ctx.arc(hl * 0.6, 0, 0.06, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (sp.id === 'boar') {
-      ctx.strokeStyle = PAL.ink;
+    } else if (sp.id === 'pheasant') ell(hl * 0.6, 0, 0.06, 0.06, '#3f6a5a');
+    else if (sp.id === 'boar') {
+      // 등갈기
       ctx.lineWidth = 0.05;
-      ctx.beginPath();
       ctx.moveTo(-hl * 0.6, 0);
       ctx.lineTo(hl * 0.6, 0);
       ctx.stroke();
     }
     // 머리
     const hr = sp.head, hx = hl + hr * 0.55;
-    ctx.fillStyle = sp.id === 'boar' ? '#3a312a' : sp.color;
-    ctx.strokeStyle = PAL.ink;
-    ctx.lineWidth = lw;
-    ctx.beginPath();
-    ctx.arc(hx, 0, hr, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    // 주둥이·귀·특징
-    ctx.beginPath();
+    Object.assign(ctx, { strokeStyle: ink, lineWidth: lw });
+    ell(hx, 0, hr, hr, sp.id === 'boar' ? '#3a312a' : sp.color, true);
+    // 주둥이·엄니·뺨·송곳니
     if (sp.id === 'wolf' || sp.id === 'fox') {
+      ctx.beginPath();
       ctx.moveTo(hx + hr * 0.6, -hr * 0.5);
       ctx.lineTo(hx + hr * 1.9, 0);
       ctx.lineTo(hx + hr * 0.6, hr * 0.5);
@@ -499,54 +374,29 @@ export class Animal extends Entity {
       ctx.fill();
       ctx.stroke();
     } else if (sp.id === 'boar') {
-      ctx.ellipse(hx + hr * 1.1, 0, hr * 0.5, hr * 0.6, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.strokeStyle = '#efeadf';
-      ctx.beginPath();
-      ctx.moveTo(hx + hr * 0.9, -hr * 0.6);
-      ctx.lineTo(hx + hr * 1.3, -hr * 0.9);
-      ctx.moveTo(hx + hr * 0.9, hr * 0.6);
-      ctx.lineTo(hx + hr * 1.3, hr * 0.9);
-      ctx.stroke();
-    } else if (sp.id === 'pheasant') {
-      ctx.fillStyle = PAL.seal; // 붉은 뺨
-      ctx.arc(hx + 0.01, 0, 0.03, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    if (sp.fangs) {
-      // 고라니 송곳니: 흰 획 2개
-      ctx.strokeStyle = '#f3eee2';
-      ctx.lineWidth = 0.025;
-      ctx.beginPath();
-      ctx.moveTo(hx + hr * 0.5, -hr * 0.35);
-      ctx.lineTo(hx + hr * 1.3, -hr * 0.55);
-      ctx.moveTo(hx + hr * 0.5, hr * 0.35);
-      ctx.lineTo(hx + hr * 1.3, hr * 0.55);
-      ctx.stroke();
-    }
-    if (sp.size !== 'S' || sp.id === 'fox') {
-      ctx.fillStyle = PAL.ink2;
-      for (const s of [-1, 1]) {
-        ctx.beginPath();
-        ctx.arc(hx - hr * 0.3, s * hr * 0.75, hr * 0.28, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+      ell(hx + hr * 1.1, 0, hr * 0.5, hr * 0.6, '#3a312a', true);
+      this.tusks(ctx, hx, hr, 0.9, 1.3, 0.6, 0.9, '#efeadf', lw);
+    } else if (sp.id === 'pheasant') ell(hx + 0.01, 0, 0.03, 0.03, PAL.seal); // 붉은 뺨
+    if (sp.fangs) this.tusks(ctx, hx, hr, 0.5, 1.3, 0.35, 0.55, '#f3eee2', 0.025); // 고라니 송곳니: 흰 획 2개
+    // 귀
+    if (sp.size !== 'S' || sp.id === 'fox') for (const s of [-1, 1]) ell(hx - hr * 0.3, s * hr * 0.75, hr * 0.28, hr * 0.28, PAL.ink2);
     ctx.lineCap = 'butt';
     ctx.restore();
   }
-}
-
-let GAME = null;
-function game_sfx(a, name) {
-  GAME?.sfx?.(name, { x: a.x, y: a.y });
+  tusks(ctx, hx, hr, x0, x1, y0, y1, color, w) {
+    Object.assign(ctx, { strokeStyle: color, lineWidth: w });
+    ctx.beginPath();
+    for (const s of [-1, 1]) {
+      ctx.moveTo(hx + hr * x0, s * hr * y0);
+      ctx.lineTo(hx + hr * x1, s * hr * y1);
+    }
+    ctx.stroke();
+  }
 }
 
 export function install(game) {
   GAME = game;
-  const list = [];
-  const packs = new Set();
+  const list = [], packs = new Set();
   let howlT = 30;
 
   function spawn(speciesId, x, y, opts = {}) {
@@ -560,8 +410,7 @@ export function install(game) {
     const spec = SPECIES[speciesId];
     if (!spec) return [];
     n = n ?? rand.int(spec.group[0], spec.group[1]);
-    const pack = n > 1 ? { members: [], target: null, species: speciesId } : null;
-    const out = [];
+    const pack = n > 1 ? { members: [], target: null, species: speciesId } : null, out = [];
     for (let i = 0; i < n; i++) {
       const p = i === 0 ? { x, y } : game.world?.randomPassableNear?.(x, y, 4 + n, 'foot') || { x: x + rand.range(-3, 3), y: y + rand.range(-3, 3) };
       const a = spawn(speciesId, p.x, p.y, { ...opts, pack, slot: i });
@@ -572,21 +421,17 @@ export function install(game) {
     return out;
   }
   /** 소리에 반응: 겁 많은 짐승은 달아나고, 범·멧돼지는 50% 소리 쪽으로 */
-  function alert(x, y, r = 60, kind = 'shot') {
+  function alert(x, y, r = 60) {
     for (const a of list) {
-      if (a.dead || a._removed || a.target || a.state === 'flee' || a.state === 'fly') continue;
-      if (Math.hypot(a.x - x, a.y - y) > r) continue;
+      if (a.dead || a._removed || a.target || a.state === 'flee' || a.state === 'fly' || Math.hypot(a.x - x, a.y - y) > r) continue;
       const t = a.spec.temper;
-      if ((t === 'charge' || t === 'stalker') && Math.random() < 0.5) {
-        a.state = 'investigate';
-        a.stateT = 25;
-        a.goal = { x, y };
-      } else a.fleeFrom({ x, y });
+      if ((t === 'charge' || t === 'stalker') && Math.random() < 0.5) Object.assign(a, { state: 'investigate', stateT: 25, goal: { x, y } });
+      else a.fleeFrom({ x, y });
     }
   }
   game.on('shot', (e) => {
-    const x = e.x ?? e.shooter?.x, y = e.y ?? e.shooter?.y;
-    if (Number.isFinite(x)) alert(x, y, (e.noise ?? 100) * (game.sys.time?.weather === 'rain' ? 0.6 : 1), 'shot');
+    const x = e.x ?? e.shooter?.x, y = e.y ?? e.shooter?.y, w = game.sys.time?.weather;
+    if (Number.isFinite(x)) alert(x, y, (e.noise ?? 100) * (w === 'rain' ? 0.6 : w === 'storm' ? 0.5 : 1), 'shot');
   });
 
   const sys = {
@@ -603,20 +448,13 @@ export function install(game) {
       for (const a of list) if (!a._removed) list[w++] = a;
       list.length = w;
       // 밤 늑대 울음 (멀리서)
-      if ((howlT -= dt) <= 0) {
-        howlT = rand.range(40, 90);
-        const p = game.player;
-        for (const pk of packs) {
-          const l = pk.members.find((m) => !m.dead && !m._removed);
-          if (!l) {
-            packs.delete(pk);
-            continue;
-          }
-          if (pk.species === 'wolf' && isNightHour(game.hour) && p && Math.hypot(l.x - p.x, l.y - p.y) < 300) {
-            game.sfx?.('wolf', { x: l.x, y: l.y });
-            break;
-          }
-        }
+      if ((howlT -= dt) > 0) return;
+      howlT = rand.range(40, 90);
+      const p = game.player;
+      for (const pk of packs) {
+        const l = pk.members.find((m) => !m.dead && !m._removed);
+        if (!l) packs.delete(pk);
+        else if (pk.species === 'wolf' && isNightHour(game.hour) && p && Math.hypot(l.x - p.x, l.y - p.y) < 300) return void game.sfx?.('wolf', { x: l.x, y: l.y });
       }
     },
   };

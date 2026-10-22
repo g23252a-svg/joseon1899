@@ -1,10 +1,12 @@
 // NPC [사람]: 두뇌(brain)·감지 게이지·소음·사건 반응·대화. game.sys.npcs
-//   spawn(def) → NPC   makeBrain(type, opts{target, weapon, home, radius, points, route, hostile, facing, vehicle, dest…})   named(id)
-//   spawnGroup(kind, x, y, n, opts)   alert(x, y, r, kind, source?)   perceive(npc, target, dt) → 0~1   witnesses(x, y, r) → NPC[]   awareness(npc, target?)
-//   (계약 밖 추가) noise(h) → 소음 반경 m · setTarget(npc, t) · calm(npc) · clearPath(vehicle|{x,y,angle,width}, range) · intimidate(npc) · equip(npc, wid)
+//   spawn(def) → NPC   makeBrain(type, opts{target, weapon, home, radius, points, route, hostile, facing, vehicle, dest, zone…})   named(id)
+//   spawnGroup(kind, x, y, n, opts{role, faction, target, hostile, tags, mounted})   alert(x, y, r, kind, source?)
+//   perceive(npc, target, dt?) → 0~1 (dt 없으면 읽기만)   witnesses(x, y, r|offender, opts?) → NPC[]   awareness(npc, target?)
+//   (계약 밖 추가) noise(h) → 소음 반경 m · setTarget(npc, t) · calm(npc) · clearPath(vehicle, range) · intimidate(npc) · equip(npc, wid)
 //                  talk(npc, actor) · list() · applyPending() · COMBAT(G.2 표) · ROLE_FACTION
-//   이벤트(추가) 'npc:report' {npc, crime, shout?, police?}  'npc:down' {npc}  'npc:surrender' {npc}  'npc:intimidated' {npc, report}
+//   이벤트(추가) 'npc:report' {npc, crime, shout?, police?}  'npc:down' {npc}  'npc:surrender' {npc}  'npc:intimidated' {npc}
 //   두뇌 mode: calm | fight | flee | report | surrender | watch | talk | dodge | investigate.  적대(플레이어 표적)면 npc.hostile + 'hostile' 태그.
+//   wanted 가 목격자에 단 data.witness 를 보면 두뇌가 순검 쪽으로 달려간다(신고 판정·시간은 wanted 몫).
 
 import { Human, makeLook } from './human.js';
 import { angleWrap, clamp, rand } from '../engine/util.js';
@@ -55,6 +57,8 @@ const W_FALLBACK = { w_knife: ['melee', 22, 0.6], w_club: ['melee', 18, 0.9], w_
 const EFF = { w_bow: 60, w_matchlock: 40, w_rifle: 90, w_revolver: 20, npc_rock: 15 };
 const VIOLENT = new Set(['assault', 'murder', 'robbery', 'arson', 'jailbreak', 'animal_cruelty']);
 const LAW = new Set(['police', 'army', 'company']);
+const NOT_CIVIL = new Set(['gang', 'rival', 'police', 'army', 'bounty', 'pirate']); // 신고하지 않는 세력
+const REST = new Set(['idle', 'wander', 'villager', 'merchant', 'guard', 'patrol', 'police', 'porter', 'bandit', 'gang', 'passenger']); // 멀면 쉬는 두뇌
 // A.2 은신 배율 · G.5 날씨 시야·소리 배수
 const STEALTH = { SHALLOW: 1, MUD: 1.2, SAND: 1.2, GRASS: 1, FIELD: 0.9, PADDY: 0.85, FOREST: 0.6, MOUNTAIN: 0.8, ROAD: 1.1, MAIN_ROAD: 1.15, STREET: 1.1, YARD: 1, BRIDGE: 1.1, RAIL: 1.1, PIER: 1, REED: 0.45 };
 export const WEATHER_SIGHT = { clear: 1, cloudy: 0.95, rain: 0.75, fog: 0.45, storm: 0.6, snow: 0.7 };
@@ -65,6 +69,7 @@ const L = {
   crime: ['저, 저런…', '도둑이야!', '순검 나리를 불러야 하오!', '이게 무슨 일이여.'],
   dodge: ['어이쿠!', '길 좀 보고 다니시오!', '아이고, 놀래라.'],
   surrender: ['살려 주시오!', '항복이오, 항복!'],
+  arrest: ['포박을 받으시오!', '순순히 따라오시오!', '멈추시오! 경무청이오.'],
   tram: ['전기거다!', '말도 없이 가요!', '저것 좀 보게.'], train: ['화륜거다!', '우레 같은 소리구먼.'], steamer: ['화륜선이다!', '연기 좀 보게.'],
   merchant: ['사려! 좋은 물건 있소!', '구경하고 가시오!', '값은 싸게 쳐 드리리다.'],
   talk: {
@@ -86,6 +91,7 @@ const roll = (list) => {
 const valid = (e) => e && e.alive !== false && !e._removed && e.state !== 'dead' && !e.dead && !e.hidden;
 const C_OF = (h) => COMBAT[h.role] || COMBAT.villager;
 const civ = (h) => C_OF(h).flee === 1;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 let pathBudget = 4; // 틱마다 길찾기 상한
 let SYS = null;
 
@@ -110,6 +116,13 @@ export class NPC extends Human {
   }
   update(dt, game) {
     if (this._hidden) return void (this.moveX = this.moveY = 0);
+    const p = game.player, b = this.brain;
+    // 멀리 있는 한가한 NPC 는 쉰다 (성능: 화면 밖 250 m 넘게)
+    if (p && this.state === 'normal' && !this.vehicle && b?.mode === 'calm' && REST.has(b.type) && Math.abs(this.x - p.x) + Math.abs(this.y - p.y) > 250) {
+      this.vx = this.vy = this.speedNow = 0;
+      if (this.speech && (this.speech.t -= dt) <= 0) this.speech = null;
+      return;
+    }
     super.update(dt, game);
   }
   damage(amount, info = {}, game) {
@@ -222,6 +235,13 @@ class Brain {
     if (h.vehicle) return this.riding(h, dt, game);
     if (h.data.dodgeUntil > game.time) return this.stop(h); // 탈것 담당의 비키기가 움직이는 중
     if (h.essentialDown) (h.essentialDown = false), this.flee(h, this.lastAttacker || game.player, 20);
+    // wanted 가 고른 목격자: 순검에게 신고하러 간다
+    const wit = h.data.witness;
+    if (!wit && this.byWanted) (this.byWanted = false), this.mode === 'report' && this.calmDown(h); // 신고가 끝났거나 위협당함
+    else if (wit && !this.byWanted && this.mode !== 'fight' && this.mode !== 'surrender') {
+      this.setMode('report');
+      Object.assign(this, { byWanted: true, said: false, repT: 0, crime: { ...wit, offender: game.player } });
+    }
     if (this.modeT > 0) this.modeT -= dt;
     const p = game.player;
     switch (this.mode) {
@@ -239,7 +259,7 @@ class Brain {
       case 'surrender':
         this.stop(h);
         h.handsUp = true;
-        if (this.modeT <= 0 && (!p || Math.hypot(p.x - h.x, p.y - h.y) > 12)) {
+        if (this.modeT <= 0 && (!p || dist(p, h) > 12)) {
           h.handsUp = h.surrendered = h.data.surrendered = false;
           h.tags.delete('surrendered');
           this.flee(h, p, 15);
@@ -291,8 +311,7 @@ class Brain {
         }
         if (this.type === 'merchant' && (this.sayT -= dt) <= 0) {
           this.sayT = rand.range(9, 18);
-          const p = game.player;
-          if (p && Math.hypot(p.x - h.x, p.y - h.y) < 14) h.say(pick(L.merchant), 2.5);
+          if (game.player && dist(game.player, h) < 14) h.say(pick(L.merchant), 2.5);
         }
         return;
       case 'follower':
@@ -300,7 +319,7 @@ class Brain {
         return this.follow(h, dt, game);
       case 'flee': {
         const from = this.resolve(o.from, game) || game.player;
-        if (!from || Math.hypot(from.x - h.x, from.y - h.y) > (o.dist ?? 60)) return this.stop(h);
+        if (!from || dist(from, h) > (o.dist ?? 60)) return this.stop(h);
         if (o.speed) h.speedRun = o.speed;
         return this.runFrom(h, from.x, from.y, 'run', game);
       }
@@ -308,7 +327,7 @@ class Brain {
         // 걸어서: 맡은 탈것 운전석으로
         const v = this.resolve(o.vehicle, game);
         if (!v || v.driver) return this.stop(h);
-        if (Math.hypot(v.x - h.x, v.y - h.y) > 2.5) return void this.moveTo(h, v.x, v.y, 'walk', dt, game, 2);
+        if (dist(v, h) > 2.5) return void this.moveTo(h, v.x, v.y, 'walk', dt, game, 2);
         return void v.enter(h, game, v.freeSeatIndex('driver'));
       }
       case 'passenger':
@@ -356,11 +375,11 @@ class Brain {
       // 지도자가 탈것에 타면 빈 승객석에 오른다
       const si = lv.freeSeatIndex?.('passenger') ?? -1;
       if (si >= 0 && Math.abs(lv.speed || 0) < 1) {
-        if (Math.hypot(lv.x - h.x, lv.y - h.y) < 3.5) return void lv.enter(h, game, si);
+        if (dist(lv, h) < 3.5) return void lv.enter(h, game, si);
         return void this.moveTo(h, lv.x, lv.y, 'run', dt, game, 2);
       }
     }
-    const d = Math.hypot(lead.x - h.x, lead.y - h.y), near = o.dist ?? 2.6;
+    const d = dist(lead, h), near = o.dist ?? 2.6;
     if (d > 60 && o.teleport !== false && !this.onScreen(h, game) && !this.onScreen(lead, game)) {
       const q = game.world?.randomPassableNear?.(lead.x, lead.y, 4, 'foot');
       if (q) (h.x = q.x), (h.y = q.y);
@@ -370,6 +389,13 @@ class Brain {
   }
   riding(h, dt, game) {
     const o = this.opts, v = h.vehicle, slow = Math.abs(v.speed || 0) < 0.8;
+    if (this.mode === 'fight') {
+      // 탈것 위 싸움: 이동은 drive 가, 조준·사격은 combat 이
+      const t = this.target;
+      if (!valid(t) || dist(t, h) > 150) return this.calmDown(h);
+      if ((this.reactT -= dt) <= 0) game.sys.combat?.npcAttack?.(h, t, dt);
+      return;
+    }
     if (this.type === 'follower' || this.type === 'companion') {
       const lead = this.resolve(o.target, game) || game.player;
       if (lead && lead.vehicle !== v && slow) v.exit(h, game);
@@ -382,7 +408,7 @@ class Brain {
     this._hcT = 0.3;
     const p = game.player;
     if (!p || p.state === 'dead' || p.hidden) return;
-    const d = Math.hypot(p.x - h.x, p.y - h.y);
+    const d = dist(p, h);
     if (d > 45) return;
     const aw = h._aw || 0, W = game.sys.wanted, lvl = W?.level || 0, f = h.faction;
     let fight = false;
@@ -394,7 +420,7 @@ class Brain {
     if (fight) this.engage(h, p, game);
     // 금지 구역 경비: 경고 뒤 5초 지나면 trespass
     const z = this.opts.zone;
-    if (!z || this.type !== 'guard' || aw < 1) return;
+    if (!z || (this.type !== 'guard' && this.type !== 'patrol') || aw < 1) return;
     if (!insideZone(z, p.x, p.y)) return void (this.warnT = this.warned = 0);
     if ((this.warnT = (this.warnT || 0) + 0.3) < 0.4) h.say('여기는 들어올 수 없소! 물러가시오.', 3);
     else if (this.warnT > 5 && !this.warned) (this.warned = true), game.emit('crime', { kind: 'trespass', x: p.x, y: p.y, offender: p, victim: h });
@@ -405,44 +431,57 @@ class Brain {
     this.setMode('fight');
     Object.assign(this, { target, reactT: react ?? C_OF(h).react ?? 0.6, lastSeen: { x: target.x, y: target.y }, lostT: 0 });
     h.setHostile?.(!!target.isPlayer);
-    if (h.faction === 'police' && target.isPlayer && Math.random() < 0.5) h.say('멈추시오! 경무청이오.', 2.5);
+    if (h.faction === 'police' && target.isPlayer && Math.random() < 0.5) h.say(pick(L.arrest), 2.5);
   }
 
-  // ---- 싸움: 거리 유지·측면 이동, 공격은 combat.npcAttack (없으면 몸싸움)
+  // ---- 싸움: 거리 유지·측면 이동은 두뇌가, 조준·사격·근접은 combat.npcAttack (없으면 몸싸움)
   fight(h, dt, game) {
     const t = this.target;
     if (!valid(t) || (t.state === 'down' && !t.isPlayer)) return this.calmDown(h);
     const C = C_OF(h), W = game.sys.wanted, lvl = W?.level || 0;
-    // 수배가 풀리면 순검·병정은 물러난다
-    if (t.isPlayer && W && (h.faction === 'police' || h.faction === 'army') && !lvl && !this.provoked && !this.opts.hostile) return this.calmDown(h);
+    // 수배가 풀리면 순검·병정·추격조는 물러난다
+    if (t.isPlayer && W && !lvl && !this.provoked && (LAW.has(h.faction) || h.tags.has('pursuer'))) return this.calmDown(h);
     const ratio = h.maxHp ? h.hp / h.maxHp : 1, fleeAt = h.fleeAt ?? C.flee ?? 0;
     if (C.surrender && ratio <= C.surrender && !h.essential) return this.surrender(h, game);
     if (fleeAt > 0 && fleeAt < 1 && ratio <= fleeAt) return this.flee(h, t, 25);
-    const d = Math.hypot(t.x - h.x, t.y - h.y);
+    const d = dist(t, h);
     const seen = t.isPlayer ? (h._aw || 0) >= 0.6 || d < 6 : d < 40;
     if (seen) (this.lastSeen = { x: t.x, y: t.y }), (this.lostT = 0);
     else this.lostT += dt;
     if (this.lostT > (this.opts.persist ?? 20) || d > 120) return this.calmDown(h);
     h.aimAngle = Math.atan2(t.y - h.y, t.x - h.x);
     if (this.reactT > 0) return (this.reactT -= dt), this.stop(h), this.face(h, t.x, t.y);
-    const cb = game.sys.combat, wid = h.weaponId || h.weapon?.id || 'fist', def = cb?.WEAPONS?.[wid];
-    const kind = def?.kind || W_FALLBACK[wid]?.[0] || 'fist';
-    const ranged = typeof cb?.npcAttack === 'function' && (kind === 'gun' || kind === 'bow' || kind === 'throw'); // 전투 시스템이 없으면 몸싸움
-    // 1~2단계 순검은 겨누거나 공격받기 전엔 쏘지 않고 다가온다(체포)
-    const holdFire = ranged && t.isPlayer && h.faction === 'police' && lvl <= 2 && !this.provoked && !(t.aiming && t.weapon);
-    const pref = holdFire ? 1.8 : ranged ? clamp((def?.effRange ?? EFF[wid] ?? 20) * 0.55, 7, 22) : 1.0;
+    const cb = game.sys.combat, wid = h.weapon?.id || 'fist', kind = cb?.WEAPONS?.[wid]?.kind || W_FALLBACK[wid]?.[0] || 'fist';
+    const atk = typeof cb?.npcAttack === 'function', ranged = atk && (kind === 'gun' || kind === 'bow' || kind === 'throw'); // 전투 시스템이 없으면 몸싸움
+    // G.3: 1~2단계 순검은 먼저 체포(넘어뜨리기)를 시도한다. 겨누거나 공격하면 사격으로 바뀐다
+    if (t.isPlayer && h.faction === 'police' && lvl > 0 && lvl <= 2 && !this.provoked && !W?.shouldShoot?.()) return this.arrest(h, t, d, dt, game);
+    const pref = ranged ? clamp((cb?.WEAPONS?.[wid]?.effRange ?? EFF[wid] ?? 20) * 0.55, 7, 22) : 1.0;
     const goal = seen ? t : this.lastSeen;
     if (d > (ranged ? pref + 2.5 : pref) || !seen) {
       if (this.moveTo(h, goal.x, goal.y, !ranged || d > 10 ? 'run' : 'walk', dt, game, seen ? pref : 2) && !seen) this.lastSeen = { x: goal.x + rand.range(-15, 15), y: goal.y + rand.range(-15, 15) };
-    } else if (ranged && !holdFire && d < pref - 4) this.runFrom(h, t.x, t.y, 'walk', game);
-    else if (ranged && !holdFire) {
+    } else if (ranged && d < pref - 4) this.runFrom(h, t.x, t.y, 'walk', game);
+    else if (ranged) {
       if ((this.strafeT -= dt) <= 0) (this.strafeT = rand.range(1.5, 3)), (this.strafe = -this.strafe);
       const a = h.aimAngle + (Math.PI / 2) * this.strafe;
       Object.assign(h, { moveX: Math.cos(a) * 0.6, moveY: Math.sin(a) * 0.6, gait: 'walk' });
     } else this.stop(h);
-    if (!seen || holdFire) return void ((h.aiming = false), holdFire && d < 3 && this.face(h, t.x, t.y));
-    if (typeof cb?.npcAttack === 'function') cb.npcAttack(h, t, dt);
-    else this.brawl(h, t, d, wid, game);
+    if (!seen) return void (h.aiming = false);
+    if (!atk) return this.brawl(h, t, d, wid, game);
+    // npcAttack 도 이동을 정하므로 두뇌의 이동(길찾기·측면 이동)을 되돌려 놓는다
+    const mx = h.moveX, my = h.moveY, gait = h.gait;
+    cb.npcAttack(h, t, dt);
+    if (ranged || d > 3) Object.assign(h, { moveX: mx, moveY: my, gait });
+  }
+  arrest(h, t, d, dt, game) {
+    h.aiming = false;
+    if (d > 1.3) this.moveTo(h, t.x, t.y, d > 4 ? 'run' : 'walk', dt, game, 1.2);
+    else this.stop(h), this.face(h, t.x, t.y);
+    if ((this.sayT -= dt) <= 0) (this.sayT = rand.range(4, 7)), h.say(pick(L.arrest), 2.2);
+    if (d > 1.8 || this.atkCd > 0) return;
+    this.atkCd = 1.4;
+    const cb = game.sys.combat;
+    if (cb?.melee) cb.melee(h, Math.atan2(t.y - h.y, t.x - h.x), { heavy: true, target: t }); // 넘어지면 wanted 가 체포
+    else this.brawl(h, t, d, 'fist', game);
   }
   brawl(h, t, d, wid, game) {
     this.face(h, t.x, t.y);
@@ -463,17 +502,26 @@ class Brain {
     game.emit('npc:surrender', { npc: h });
   }
 
-  // ---- 신고 (G.3): 가까운 순검에게 달려가 15 m 안에서 신고, 150 m 안에 없으면 25초 뒤 소리친다
+  // ---- 신고 (G.3): 가까운 순검에게 3.8 m/s 로 달려가 15 m 안에서 신고, 150 m 안에 없으면 25초 뒤 소리친다
   report(h, dt, game) {
+    const wit = h.data.witness;
     this.repT = (this.repT || 0) + dt;
-    const cop = nearestCop(h, 150);
-    const done = (ev, line) => (h.say(line, 3), game.emit('npc:report', { npc: h, crime: this.crime, ...ev }), (this.repT = 0), this.calmDown(h));
+    const pol = wit?.police != null ? game.byId(wit.police) : null;
+    const cop = valid(pol) ? pol : nearestCop(h, 150);
+    const done = (ev, line) => {
+      if (!this.said) (this.said = true), h.say(line, 3);
+      if (this.byWanted) return; // 판정은 wanted 가 한다
+      game.emit('npc:report', { npc: h, crime: this.crime, ...ev });
+      this.repT = 0;
+      this.calmDown(h);
+    };
     if (cop) {
-      if (Math.hypot(cop.x - h.x, cop.y - h.y) < 15) return done({ police: cop }, '나리! 저자가 죄를 지었습니다요!');
+      if (dist(cop, h) < 15) return this.stop(h), this.face(h, cop.x, cop.y), done({ police: cop }, '나리! 저자가 죄를 지었습니다요!');
       return void this.moveTo(h, cop.x, cop.y, 'run', dt, game, 12);
     }
     const o = this.crime?.offender || game.player;
-    if (o) this.runFrom(h, o.x, o.y, 'run', game);
+    if (o && dist(o, h) < 40) this.runFrom(h, o.x, o.y, 'run', game);
+    else this.stop(h);
     if (this.repT > 25) done({ shout: true }, '사람 살려! 순검 나리!');
   }
 
@@ -493,12 +541,13 @@ class Brain {
     h.say('도둑이야!', 3);
     if (!civ(h)) return this.engage(h, robber, game);
     this.setMode('report');
-    this.crime = { kind: 'theft', x: h.x, y: h.y, offender: robber, victim: h };
+    Object.assign(this, { said: false, repT: 0, crime: { kind: 'theft', x: h.x, y: h.y, offender: robber, victim: h } });
   }
 
-  // ---- 탈것 운전 (driver): 목적지(opts.dest) 또는 근처 길로 길찾기, 앞에 사람이 있으면 서서 비키라 한다
+  // ---- 탈것 운전: 싸움이면 표적을 쫓고, 아니면 목적지(opts.dest)나 근처 길로. 앞에 사람이 있으면 서서 비키라 한다
   drive(v, h, dt, game) {
-    const c = v.ctl, o = this.opts, w = game.world;
+    const c = v.ctl, o = this.opts, w = game.world, t = this.mode === 'fight' && valid(this.target) ? this.target : null;
+    if (t && (!this.dest || dist(this.dest, t) > 8)) (this.dest = { x: t.x, y: t.y }), (this.vpath = null);
     if (!this.dest) {
       this.dest = o.dest ? { x: o.dest.x ?? o.dest[0], y: o.dest.y ?? o.dest[1] } : null;
       if (!this.dest) {
@@ -509,14 +558,14 @@ class Brain {
       this.vpath = null;
     }
     const goal = this.dest;
-    if (!goal || Math.hypot(goal.x - v.x, goal.y - v.y) < (o.arrive ?? 5)) {
+    if (!goal || Math.hypot(goal.x - v.x, goal.y - v.y) < (t ? 7 : o.arrive ?? 5)) {
       Object.assign(c, { throttle: 0, steer: 0, brake: true });
-      if (!o.dest && (this.waitT = (this.waitT || 0) + dt) > 4) this.dest = this.waitT = null;
+      if (!t && !o.dest && (this.waitT = (this.waitT || 0) + dt) > 4) this.dest = this.waitT = null;
       return;
     }
     if (!this.vpath && pathBudget > 0 && game.time >= this.nextPathT) {
       pathBudget--;
-      this.nextPathT = game.time + 2;
+      this.nextPathT = game.time + (t ? 1 : 2);
       const pts = w?.findPath?.(v.x, v.y, goal.x, goal.y, v.moveMode, 5000);
       this.vpath = { pts: pts?.length > 1 ? pts : [[goal.x, goal.y]], i: pts?.length > 1 ? 1 : 0 };
     }
@@ -526,9 +575,9 @@ class Brain {
       while (P.i < P.pts.length - 1 && Math.hypot(P.pts[P.i][0] - v.x, P.pts[P.i][1] - v.y) < 3) P.i++;
       [tx, ty] = P.pts[Math.min(P.i, P.pts.length - 1)];
     }
-    const diff = angleWrap(Math.atan2(ty - v.y, tx - v.x) - v.angle), ahead = v.length / 2 + 2.5;
-    const block = game.nearest(v.x + Math.cos(v.angle) * ahead, v.y + Math.sin(v.angle) * ahead, 2.2, (e) => e.kind === 'human' && !e.vehicle && e.state !== 'dead');
-    Object.assign(c, { steer: clamp(diff * 2, -1, 1), throttle: block ? 0 : Math.abs(diff) > 1.4 ? 0.3 : o.speed ?? 0.7, sprint: false, brake: !!block });
+    const diff = angleWrap(Math.atan2(ty - v.y, tx - v.x) - v.angle), ahead = (v.length || 2) / 2 + 2.5;
+    const block = game.nearest(v.x + Math.cos(v.angle) * ahead, v.y + Math.sin(v.angle) * ahead, 2.2, (e) => e.kind === 'human' && !e.vehicle && e.state !== 'dead' && e !== t);
+    Object.assign(c, { steer: clamp(diff * 2, -1, 1), throttle: block ? 0 : Math.abs(diff) > 1.4 ? 0.3 : t ? 1 : o.speed ?? 0.7, sprint: !!t && !block, brake: !!block });
     if (block && game.time > (this.honkT || 0)) {
       this.honkT = game.time + 3;
       SYS?.clearPath(v, 12);
@@ -560,7 +609,7 @@ function nearestCop(h, r) {
 // ---------------------------------------------------------------- 시스템
 export function install(game) {
   const npcs = [], byName = new Map(), tStealth = new Map();
-  let murmurT = 0, scanT = 0, novT = 0;
+  let murmurT = 0, scanT = 0, novT = 0, cleanT = 2;
   const isNight = () => game.sys.time?.isNight?.() ?? (game.hour < 5 || game.hour >= 20);
   const weather = () => game.sys.time?.weather || 'clear';
   const live = (n) => n.state === 'normal' && !n._hidden;
@@ -570,6 +619,7 @@ export function install(game) {
     if (!tStealth.size) for (const k in STEALTH) if (w.T[k] != null) tStealth.set(w.T[k], STEALTH[k]);
     return tStealth.get(w.terrainAt(x, y)) ?? 1;
   };
+  const los = (a, b) => game.sys.combat?.lineOfSight?.(a.x, a.y, b.x, b.y) ?? true;
 
   /** 소음 반경(m) — G.2: 웅크려 걷기 2(× stealthNoise), 걷기 6, 달리기 12, 질주 18, 말 평보 15, 말 질주 30 × 날씨 */
   function noise(h) {
@@ -583,16 +633,25 @@ export function install(game) {
     return (h.crouching ? 2 * (game.sys.skills?.mod?.('stealthNoise', 1) ?? 1) : h.gait === 'sprint' ? 18 : h.gait === 'run' && h.speedNow > 2 ? 12 : 6) * wm;
   }
 
-  /** 감지 게이지 (G.2): R = 시야(낮 22/밤 10) × 날씨 × 지형 은신 (× 횃불 2). R 안·시야각 110° 면 차고, 아니면 −0.4/s. 1 이면 발견 */
+  /** 감지 게이지 (G.2): R = 시야(낮 22/밤 10) × 날씨 × 지형 은신 (× 횃불 2). R 안·시야각 110°·가림 없으면 차고, 아니면 −0.4/s. 1 이면 발견.
+   *  dt 를 주지 않으면 지금 값만 돌려준다 (wanted·combat 의 판정용) */
   function perceive(npc, target, dt) {
-    if (!npc || !target || !live(npc)) return 0;
+    if (!npc || !target) return 0;
     const store = target.isPlayer ? null : (npc._awm ||= new Map());
     let v = store ? store.get(target.id) || 0 : npc._aw || 0;
+    if (!(dt > 0) || !live(npc)) return v;
     const dx = target.x - npc.x, dy = target.y - npc.y, d = Math.hypot(dx, dy);
     let R = (isNight() ? 10 : 22) * (WEATHER_SIGHT[weather()] ?? 1) * stealthAt(target.x, target.y) * (target.torch ? 2 : 1);
     if (target.hidden || target.state === 'dead') R = 0;
     const fov = Math.abs(angleWrap(Math.atan2(dy, dx) - npc.angle)) < (55 * Math.PI) / 180;
-    if (d < R && (fov || d < 4)) {
+    let see = d < R && (fov || d < 4);
+    if (see && store) see = los(npc, target);
+    else if (see) {
+      // 가림 판정은 0.3초마다 (성능)
+      if (!npc._los || game.time - npc._los.t > 0.3) npc._los = { t: game.time, v: los(npc, target) };
+      see = npc._los.v;
+    }
+    if (see) {
       const pose = target.crouching ? 0.5 : target.gait === 'sprint' || (target.gait === 'run' && target.speedNow > 2) || target.vehicle ? 1.5 : 1;
       v += dt * (1.5 * (1 - d / R) + 0.25) * pose;
     } else if (d < noise(target)) {
@@ -605,20 +664,24 @@ export function install(game) {
     return v;
   }
   const awareness = (npc, target = game.player) => (!npc ? 0 : !target || target.isPlayer ? npc._aw || 0 : npc._awm?.get(target.id) || 0);
-  /** 목격자: 반경 r(기본 낮 25/밤 12 m) 안에서 그 자리를 볼 수 있는 NPC, 가까운 순. 활빈패·화적은 빼고 */
-  function witnesses(x, y, r) {
-    const out = [], rr = (r ?? (isNight() ? 12 : 25)) * (WEATHER_SIGHT[weather()] ?? 1);
+  /** (x,y) 를 볼 수 있는 NPC: 반경(기본 낮 25/밤 12 m × 날씨) 안, 시야각 안이거나 가깝거나 이미 알아챈 자, 가림 없음. 가까운 순 */
+  function seers(x, y, r, except) {
+    const out = [], rr = (Number.isFinite(r) ? r : isNight() ? 12 : 25) * (WEATHER_SIGHT[weather()] ?? 1), at = { x, y };
     for (const n of npcs) {
-      if (!live(n) || n.faction === 'gang' || n.faction === 'rival' || n.noWitness) continue;
+      if (n === except || !live(n) || n.noWitness) continue;
       const dx = x - n.x, dy = y - n.y, d = Math.hypot(dx, dy);
-      if (d <= rr && (Math.abs(angleWrap(Math.atan2(dy, dx) - n.angle)) < 1.1 || d < rr * 0.35 || (n._aw || 0) >= 0.5)) out.push([d, n]);
+      if (d <= rr && (Math.abs(angleWrap(Math.atan2(dy, dx) - n.angle)) < 1.1 || d < rr * 0.35 || (n._aw || 0) >= 0.5) && (d < 3 || los(n, at))) out.push([d, n]);
     }
     return out.sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+  }
+  /** 목격자(신고할 사람): witnesses(x, y, r) 또는 wanted 식 witnesses(x, y, offender, {kind, victim}). 활빈패·화적·관헌·현상금꾼·수적은 빼고 */
+  function witnesses(x, y, r, opts) {
+    const off = r && typeof r === 'object' ? r : opts?.offender || null;
+    return seers(x, y, typeof r === 'number' ? r : undefined, off).filter((n) => !NOT_CIVIL.has(n.faction) && n.brain?.mode !== 'fight');
   }
 
   const makeBrain = (type = 'idle', opts = {}) => new Brain(type, opts || {});
   function equip(n, wid) {
-    n.weaponId = wid || null;
     if (!wid) return void (n.weapon = null);
     try {
       game.sys.combat?.equip?.(n, wid);
@@ -661,7 +724,7 @@ export function install(game) {
     npcs.push(n);
     if (def.id) byName.set(def.id, n);
     if (def.hidden) n.hidden = true;
-    // 무기 (G.2 확률표). 순검은 수배 2단계부터 4명 중 1명 육혈포
+    // 무기 (G.2 확률표). 순검은 수배 2단계부터 4명 중 1명 육혈포, 외국인 경호원은 육혈포
     let wid = def.weapon !== undefined ? (def.weapon === 'fist' ? null : def.weapon) : roll(C.weapons);
     if (def.weapon === undefined && ((role === 'sungeom' && (game.sys.wanted?.level || 0) >= 2 && Math.random() < 0.25) || (C.revolver && Math.random() < C.revolver) || def.bodyguard)) wid = 'w_revolver';
     equip(n, wid);
@@ -675,6 +738,15 @@ export function install(game) {
       const p = game.world?.randomPassableNear?.(x, y, 3 + count, 'foot') || { x: x + rand.range(-2, 2), y: y + rand.range(-2, 2) };
       const n = spawn({ ...opts, role: opts.role || role, brain: opts.brain || brain, x: p.x, y: p.y, target: undefined, brainOpts: { persist: target ? 60 : undefined, ...(opts.brainOpts || {}) } });
       n.data.group = kind;
+      if (opts.mounted) {
+        // 기마 추격조: 말에 태운다 (탈것 시스템이 없으면 걸어서)
+        try {
+          const v = game.sys.vehicles?.spawn?.(opts.mounted, n.x, n.y, 0, { owner: n.id });
+          if (v && v.enter(n, game, v.freeSeatIndex?.('driver') ?? 0) === false) game.remove(v);
+        } catch (err) {
+          console.warn('[npcs] mounted', err?.message);
+        }
+      }
       if (target) n.brain.engage(n, target, game, rand.range(0.2, 0.8));
       out.push(n);
     }
@@ -693,31 +765,30 @@ export function install(game) {
     }
   }
 
-  /** 총소리·비명 등: 민간인은 도망(가끔 손 들기), 법·적대 세력은 대응, 그 밖은 살피러 간다 */
+  /** 소리(총·비명·소음·수배 신고): 가까운 민간인은 도망(가끔 손 들기), 먼 민간인은 돌아본다. 법·적대 세력은 대응, 그 밖은 살피러 간다 */
   function alert(x, y, radius = 30, kind = 'shot', source = null) {
     const loud = kind === 'shot' || kind === 'scream' || kind === 'explosion' || kind === 'fire', W = game.sys.wanted;
+    if (kind === 'wanted') source ||= game.player;
     for (const n of npcs) {
-      const b = n.brain;
-      if (n === source || !live(n) || n.vehicle || !b || b.mode === 'fight' || b.mode === 'surrender' || Math.hypot(n.x - x, n.y - y) > radius) continue;
+      const b = n.brain, d = Math.hypot(n.x - x, n.y - y);
+      if (n === source || d > radius || !live(n) || n.vehicle || !b || b.mode === 'fight' || b.mode === 'surrender' || b.mode === 'report') continue;
       const pl = source?.isPlayer, f = n.faction;
       if (civ(n)) {
-        if (!loud) (b.setMode('watch', 2), (b.lookAt = { x, y }));
-        else if (Math.random() < 0.85 || Math.hypot(n.x - x, n.y - y) < 10) b.flee(n, { x, y }, rand.range(8, 15));
-        else b.surrender(n, game);
+        if (loud && (d < radius * 0.6 || d < 12)) Math.random() < 0.85 || d < 10 ? b.flee(n, { x, y }, rand.range(8, 15)) : b.surrender(n, game);
+        else if (b.mode === 'calm') (b.setMode('watch', loud ? 3 : 1.5), (b.lookAt = { x, y }));
       } else if (pl && (f === 'rival' || f === 'pirate' || (f === 'bounty' && (W?.bounty || 0) >= 100) || (LAW.has(f) && (W?.level || 0) > 0))) b.engage(n, source, game);
-      else if (f !== 'gang' && b.mode !== 'report') (b.setMode('investigate', 8), (b.goal = { x: x + rand.range(-4, 4), y: y + rand.range(-4, 4) }));
+      else if (f !== 'gang' && b.mode === 'calm' && d < Math.max(12, radius * 0.7)) (b.setMode('investigate', 8), (b.goal = { x: x + rand.range(-4, 4), y: y + rand.range(-4, 4) }));
     }
     if (loud) murmur(x, y, radius * 0.5, L.panic);
   }
 
-  /** 위협(1.5초 겨누기): 성공 0.7(스킬 'intimidate') → 손들기. 신고하러 가던 목격자면 신고 취소 + 의 −1 */
+  /** 위협(1.5초 겨누기): 성공 0.7(스킬 'intimidate') → 손들기. wanted 가 맡은 목격자 위협은 wanted 가 판정한다 */
   function intimidate(n) {
     const b = n?.brain;
     if (!b || n.state !== 'normal' || Math.random() >= (game.sys.skills?.mod?.('intimidate', 0.7) ?? 0.7)) return false;
     const rep = b.mode === 'report';
     b.surrender(n, game);
     n.say(rep ? '아, 알겠소! 아무 말 않겠소!' : pick(L.surrender), 3);
-    if (rep) game.sys.wanted?.addHonor?.(-1, '목격자 위협');
     game.emit('npc:intimidated', { npc: n, report: rep });
     return true;
   }
@@ -759,7 +830,7 @@ export function install(game) {
   const cond = (c) => game.sys.missions?.cond?.(c) ?? (c?.[0] === '!' ? !game.flags[c.slice(1)] : !!game.flags[c]);
   function nextLine(n) {
     let lines = typeof n.dialog === 'string' ? [n.dialog] : (n.dialog || []).slice();
-    for (const [c, t] of n.dialogAfter || []) if (cond(c)) lines.push(t);
+    for (const [c, t] of n.dialogAfter || []) if (cond(c) && !lines.includes(t)) lines.push(t);
     lines = lines.filter((l) => typeof l === 'string' || (l && (!l.flag || cond(l.flag)) && (!l.not || !game.flags[l.not])));
     if (lines.length) {
       const l = lines[(n._dlgI = ((n._dlgI ?? -1) + 1) % lines.length)];
@@ -779,20 +850,22 @@ export function install(game) {
     const x = e.x ?? e.shooter?.x, y = e.y ?? e.shooter?.y, r = (e.noise ?? 100) * (WEATHER_SOUND[weather()] ?? 1);
     if (Number.isFinite(x) && r > 1) alert(x, y, r, 'shot', e.shooter);
   });
+  game.on('noise', (e) => e && Number.isFinite(e.x) && e.radius > 1 && alert(e.x, e.y, e.radius, 'noise', e.source)); // combat: 근접·잠입 소음
   game.on('crime', (e) => {
     const off = e.offender;
     if (!off || !Number.isFinite(e.x)) return;
-    const violent = VIOLENT.has(e.kind);
+    // 플레이어 범죄의 신고는 wanted 가 목격자(data.witness)를 골라 맡는다
+    const violent = VIOLENT.has(e.kind), managed = off.isPlayer && !!game.sys.wanted?.report;
     let reporter = null;
-    for (const n of witnesses(e.x, e.y)) {
+    for (const n of seers(e.x, e.y, undefined, off)) {
       const b = n.brain;
-      if (n === off || !b || b.mode === 'fight') continue;
+      if (!b || b.mode === 'fight' || b.mode === 'report') continue;
       if (LAW.has(n.faction)) {
         if (violent || off.isPlayer) b.engage(n, off, game);
-      } else if (!reporter && n.faction === 'civilian' && n !== e.victim) {
+      } else if (!managed && !reporter && n.faction === 'civilian' && n !== e.victim) {
         reporter = n;
         b.setMode('report');
-        b.crime = e;
+        Object.assign(b, { crime: e, said: false, repT: 0 });
         n.say(violent ? '사람 죽네! 순검 나리!' : '도둑이야!', 2.5);
       } else if (civ(n) && violent) b.flee(n, off, rand.range(8, 14));
       else if (b.mode === 'calm') (b.setMode('watch', 2.5), (b.lookAt = { x: e.x, y: e.y }));
@@ -804,7 +877,7 @@ export function install(game) {
     if (t?.kind !== 'human') return;
     // 동료: 플레이어를 친 자, 플레이어가 친 적대자를 노린다
     const foe = t === p && src && src !== p && src.kind !== 'vehicle' ? src : src === p && t !== p && (t.hostile || t.faction === 'rival' || t.brain?.target === p) ? t : null;
-    if (foe) for (const n of npcs) if (n.brain?.type === 'companion' && n.brain.mode !== 'fight' && live(n) && Math.hypot(n.x - foe.x, n.y - foe.y) < 40) n.brain.engage(n, foe, game, 0.3);
+    if (foe) for (const n of npcs) if (n.brain?.type === 'companion' && n.brain.mode !== 'fight' && live(n) && dist(n, foe) < 40) n.brain.engage(n, foe, game, 0.3);
     if (t !== p && (e.kind === 'bullet' || e.kind === 'melee' || e.kind === 'fist')) murmur(t.x, t.y, 12, e.kind === 'bullet' ? L.panic : L.crime);
   });
   game.on('kill', (e) => {
@@ -827,7 +900,7 @@ export function install(game) {
       for (const n of npcs) {
         if (!live(n)) continue;
         const dx = n.x - p.x, dy = n.y - p.y, d = Math.hypot(dx, dy);
-        if (!(p.aiming && (wk === 'gun' || wk === 'bow') && d < 25 && Math.abs(angleWrap(Math.atan2(dy, dx) - p.aimAngle)) < 0.14)) {
+        if (n.data.witness || !(p.aiming && (wk === 'gun' || wk === 'bow') && d < 25 && Math.abs(angleWrap(Math.atan2(dy, dx) - p.aimAngle)) < 0.14)) {
           n._aimedT = 0;
           continue;
         }
@@ -842,7 +915,7 @@ export function install(game) {
       // 마당(YARD): "남의 집이오"
       const w = game.world;
       if (w?.T?.YARD != null && !p.vehicle && w.terrainAt(p.x, p.y) === w.T.YARD && game.realTime > (p._yardT || 0)) {
-        const n = npcs.find((n) => n.faction === 'civilian' && live(n) && n.brain?.mode === 'calm' && Math.hypot(n.x - p.x, n.y - p.y) < 7 && (n._aw || 0) > 0.5);
+        const n = npcs.find((n) => n.faction === 'civilian' && live(n) && n.brain?.mode === 'calm' && dist(n, p) < 7 && (n._aw || 0) > 0.5);
         if (n) (n.say('남의 집이오.', 2.5), n.brain.setMode('watch', 2), (n.brain.lookAt = { x: p.x, y: p.y }), (p._yardT = game.realTime + 30));
       }
     }
@@ -853,7 +926,7 @@ export function install(game) {
       if (Math.hypot(v.vx, v.vy) < 0.5) continue;
       const [lines, base] = NOVEL[v.vtype], chance = v.vtype === 'tram' && game.flags.tram_festival ? 0.8 : base;
       for (const n of npcs) {
-        if (n.vehicle || !live(n) || n.brain?.mode !== 'calm' || n.faction === 'foreign' || Math.hypot(n.x - v.x, n.y - v.y) > 12) continue;
+        if (n.vehicle || !live(n) || n.brain?.mode !== 'calm' || n.faction === 'foreign' || dist(n, v) > 12) continue;
         if (n._novV === v.id && game.time - n._novT < 30) continue;
         Object.assign(n, { _novV: v.id, _novT: game.time });
         if (Math.random() > chance) continue;
@@ -861,6 +934,16 @@ export function install(game) {
         n.brain.lookAt = v;
         if (Math.random() < 0.25) n.say(pick(lines), 2);
       }
+    }
+  }
+  /** 추격조·현상금 습격조는 멀어지면 정리 (spawner 가 맡지 않는 무리) */
+  function cleanStray(p) {
+    const b = game.camera?.bounds?.(4);
+    for (const n of npcs) {
+      if (!(n.tags.has('pursuer') || n.tags.has('bounty_ambush')) || (n.brain?.mode === 'fight' && n.state !== 'dead') || dist(n, p) < 200) continue;
+      if (b && n.x > b.x0 && n.x < b.x1 && n.y > b.y0 && n.y < b.y1) continue;
+      n.vehicle?.exit?.(n, game, { force: true, silent: true });
+      game.remove(n);
     }
   }
 
@@ -889,7 +972,9 @@ export function install(game) {
         else if (n._aw) n._aw = Math.max(0, n._aw - 0.4 * dt);
       }
       npcs.length = w;
-      if (p) periodic(dt, p);
+      if (!p) return;
+      periodic(dt, p);
+      if ((cleanT -= dt) <= 0) (cleanT = 2), cleanStray(p);
     },
     serialize() {
       const out = {};

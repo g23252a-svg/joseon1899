@@ -1,7 +1,7 @@
 // 길찾기: 4m 거친 격자(모드별 통행·비용) + 이진 힙 A* + 시야 기반 경로 다듬기.
 // 비용은 지형 속도 배율의 역수(길을 좋아한다). 건물·성벽 solids 도 막는다.
 
-import { T, SPEED } from './terrain.js';
+import { T, SPEED, EDGE_BAND } from './terrain.js';
 
 const NAV_MODES = ['foot', 'horse', 'wheel', 'boat'];
 const SQ2 = Math.SQRT2;
@@ -117,13 +117,42 @@ export class Nav {
 
   /** 모드 하나의 격자 만들기 */
   buildMode(mode) {
-    const tr = this.tr, k = this.k, nx = this.nx, ny = this.ny, C = tr.cols, R = tr.rows, g = tr.grid;
+    const grid = new Uint8Array(this.nx * this.ny);
+    this._fill(mode, grid, 0, 0, this.nx - 1, this.ny - 1);
+    this.grids[mode] = grid;
+    this._finish(mode, grid);
+    return grid;
+  }
+
+  /** 건물이 생기거나 없어진 사각형(m)만 다시 계산 (지도 상태 변화) */
+  updateRect(x0, y0, x1, y1) {
+    const cs = this.cs;
+    const i0 = Math.max(0, Math.floor(x0 / cs)), i1 = Math.min(this.nx - 1, Math.floor(x1 / cs));
+    const j0 = Math.max(0, Math.floor(y0 / cs)), j1 = Math.min(this.ny - 1, Math.floor(y1 / cs));
+    if (i1 < i0 || j1 < j0) return;
+    for (const mode of Object.keys(this.grids)) {
+      this._fill(mode, this.grids[mode], i0, j0, i1, j1);
+      (this._stale || (this._stale = new Set())).add(mode); // 연결 성분은 쓸 때 다시 센다
+    }
+  }
+
+  /** 미뤄 둔 연결 성분 다시 세기 */
+  _fresh(mode) {
+    if (this._stale?.has(mode)) {
+      this._stale.delete(mode);
+      this._finish(mode, this.grids[mode]);
+    }
+  }
+
+  /** 거친 칸 [i0..i1]×[j0..j1] 의 비용: 지형 → 가장자리 띠 → 건물·성벽 */
+  _fill(mode, grid, i0, j0, i1, j1) {
+    const tr = this.tr, k = this.k, nx = this.nx, C = tr.cols, R = tr.rows, g = tr.grid;
     const sp = SPEED[mode] || SPEED.foot;
     const bu = tr.bridgeUnder;
-    const grid = new Uint8Array(nx * ny);
     const roadBias = mode !== 'boat';
-    for (let j = 0; j < ny; j++)
-      for (let i = 0; i < nx; i++) {
+    for (let j = j0; j <= j1; j++)
+      for (let i = i0; i <= i1; i++) {
+        grid[j * nx + i] = 0;
         let sum = 0, ok = true, road = 0;
         for (let sy = 0; sy < k && ok; sy++) {
           const cy = j * k + sy;
@@ -157,22 +186,32 @@ export class Nav {
         if (roadBias && road < (k * k) / 2) c *= 1.15; // 길을 조금 더 좋아하게
         grid[j * nx + i] = Math.max(1, Math.min(250, Math.round(c)));
       }
-    // 건물·성벽
     const cs = this.cs;
-    for (const s of this.st.solids) {
+    // 지도 가장자리 띠 (지나갈 수 없는 한지)
+    const E = EDGE_BAND / cs + 1;
+    for (let j = j0; j <= j1; j++)
+      for (let i = i0; i <= i1; i++) {
+        if (i > E && j > E && i < nx - 1 - E && j < this.ny - 1 - E) continue;
+        if (tr.edgeVoid((i + 0.5) * cs, (j + 0.5) * cs)) grid[j * nx + i] = 0;
+      }
+    // 건물·성벽
+    for (const s of this.st.querySolids(i0 * cs, j0 * cs, (i1 + 1) * cs, (j1 + 1) * cs, [])) {
       if (s.blocks && !s.blocks.includes(mode)) continue;
-      const i0 = Math.max(0, Math.floor(s.x0 / cs)), i1 = Math.min(nx - 1, Math.floor(s.x1 / cs));
-      const j0 = Math.max(0, Math.floor(s.y0 / cs)), j1 = Math.min(ny - 1, Math.floor(s.y1 / cs));
+      const a0 = Math.max(i0, Math.floor(s.x0 / cs)), a1 = Math.min(i1, Math.floor(s.x1 / cs));
+      const b0 = Math.max(j0, Math.floor(s.y0 / cs)), b1 = Math.min(j1, Math.floor(s.y1 / cs));
       const ca = Math.cos(-(s.angle || 0)), sa = Math.sin(-(s.angle || 0));
       const hw = s.w / 2 + 0.6, hh = s.h / 2 + 0.6;
-      for (let j = j0; j <= j1; j++)
-        for (let i = i0; i <= i1; i++) {
+      for (let j = b0; j <= b1; j++)
+        for (let i = a0; i <= a1; i++) {
           const x = (i + 0.5) * cs - s.x, y = (j + 0.5) * cs - s.y;
           const lx = x * ca - y * sa, ly = x * sa + y * ca;
           if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) grid[j * nx + i] = 0;
         }
     }
-    this.grids[mode] = grid;
+  }
+
+  /** 연결 성분 번호 + 나루 간선 합치기 */
+  _finish(mode, grid) {
     const lab = this.label(grid);
     // 나루 간선으로 이어진 성분은 하나로
     const lm = this._linkCells(mode, grid);
@@ -219,7 +258,9 @@ export class Nav {
   /** 두 점이 같은 모드로 이어진 땅(물)인가 */
   connected(x0, y0, x1, y1, mode = 'foot') {
     const grid = this.gridFor(mode);
-    const lab = this.comps[mode === 'swim' ? 'boat' : NAV_MODES.includes(mode) ? mode : 'foot'];
+    const gm = mode === 'swim' ? 'boat' : NAV_MODES.includes(mode) ? mode : 'foot';
+    this._fresh(gm);
+    const lab = this.comps[gm];
     const a = this.snap(grid, x0, y0), b = this.snap(grid, x1, y1);
     return a >= 0 && b >= 0 && lab[a] === lab[b];
   }
@@ -277,6 +318,7 @@ export class Nav {
       this.lastFail = s < 0 ? 'start' : 'goal';
       return null;
     }
+    this._fresh(mode === 'swim' ? 'boat' : NAV_MODES.includes(mode) ? mode : 'foot');
     const lab = this.comps[mode === 'swim' ? 'boat' : NAV_MODES.includes(mode) ? mode : 'foot'];
     if (lab && lab[s] !== lab[goal]) {
       this.lastFail = 'unreachable';

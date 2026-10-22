@@ -1,9 +1,10 @@
 // 월드 조립: 지도 데이터(mapdata) → 지형 격자(terrain) → 건물·나무(structures) → 길찾기(nav) → 렌더러(render).
 // ARCHITECTURE.md §4 World API 를 game.world 에 설정하고 GROUND·DECAL·HIGH 렌더러를 등록한다.
+// §10 추가분: regions[].wanted, zones[].ref, world.setMapState(flag, on) (스펙 A.6).
 
 import { LAYER } from '../engine/entity.js';
 import { MAP } from './mapdata.js';
-import { T, TERRAIN, PASS, SPEED, buildTerrain } from './terrain.js';
+import { T, TERRAIN, PASS, SPEED, EDGE_BAND, inEdgeBand, buildTerrain } from './terrain.js';
 import { buildStructures } from './structures.js';
 import { Nav } from './nav.js';
 import { WorldRenderer } from './render.js';
@@ -19,15 +20,48 @@ const T_MAPCOLOR = {
   [T.VOID]: PAL.paperShade, [T.SEA]: PAL.sea, [T.RIVER]: PAL.river, [T.SHALLOW]: PAL.shallow, [T.MUD]: PAL.mud, [T.SAND]: PAL.sand,
   [T.GRASS]: PAL.grass, [T.FIELD]: PAL.field, [T.PADDY]: PAL.paddy, [T.FOREST]: PAL.forest, [T.MOUNTAIN]: PAL.mountain, [T.ROCK]: PAL.rock,
   [T.ROAD]: PAL.road, [T.MAIN_ROAD]: PAL.mainRoad, [T.STREET]: PAL.street, [T.YARD]: PAL.yard, [T.WALL]: PAL.wallStone,
-  [T.BRIDGE]: mixHex(PAL.timber, PAL.paper, 0.4), [T.RAIL]: PAL.rail, [T.PIER]: mixHex(PAL.timber, PAL.paper, 0.3),
+  [T.BRIDGE]: mixHex(PAL.timber, PAL.paper, 0.4), [T.RAIL]: PAL.rail, [T.PIER]: mixHex(PAL.timber, PAL.paper, 0.3), [T.REED]: PAL.reed,
 };
+
+// ---------------------------------------------------------------- 지도 데이터 정리 (ref·rect → poly)
+
+const shapeOf = (v) => (v.poly ? { poly: v.poly } : v.points ? { poly: v.points } : v.r ? { x: v.x, y: v.y, r: v.r } : null);
+/** 'sands[0]', 'walls.gyeongbok_wall', 'forests.f_goyang' → {poly}|{x,y,r}|null */
+export function resolveRef(M, ref) {
+  let m = /^(\w+)\[(\d+)\]$/.exec(ref || '');
+  if (m) {
+    const v = M[m[1]]?.[+m[2]];
+    return Array.isArray(v) ? { poly: v } : v ? shapeOf(v) : null;
+  }
+  m = /^(\w+)\.(.+)$/.exec(ref || '');
+  const v = m && (M[m[1]] || []).find((o) => o.id === m[2]);
+  return v ? shapeOf(v) : null;
+}
+function normalizeArea(M, a) {
+  if (a.poly || a.r) return a;
+  if (a.rect) {
+    const [x0, y0, x1, y1] = a.rect;
+    return { ...a, poly: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] };
+  }
+  const s = a.ref ? resolveRef(M, a.ref) : null;
+  if (a.ref && !s) console.warn('[world] 찾을 수 없는 ref:', a.id, a.ref);
+  return s ? { ...a, ...s } : a;
+}
+/** zones·regions 의 ref(다른 필드 다각형)·rect 를 풀어 둔 지도 사본 */
+export function normalizeMap(M) {
+  return { ...M, zones: (M.zones || []).map((z) => normalizeArea(M, z)), regions: (M.regions || []).map((r) => normalizeArea(M, r)) };
+}
+
+// 스펙 A.6 지도 상태 플래그 (새 게임 = 철로 공사 중)
+const MAP_FLAGS = ['rail_construction', 'rail_trial', 'rail_open', 'tram_suspended', 'tram_resumed'];
+const DEFAULT_STATE = { rail_construction: true, rail_trial: false, rail_open: false, tram_suspended: false, tram_resumed: false };
 
 /**
  * 월드를 만들어 game.world 에 넣는다.
  * onProgress(p 0..1, 문구)
  */
 export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
-  const M = mapData;
+  const M = normalizeMap(mapData);
   const prog = (a, b) => (p, text) => {
     try {
       onProgress(a + (b - a) * Math.max(0, Math.min(1, p)), text);
@@ -47,16 +81,21 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
   // 나룻배 자리: 물 건너는 길찾기 간선
   const ferries = (M.ferries || []).map((f) => {
     const L = Math.hypot(f.b.x - f.a.x, f.b.y - f.a.y);
-    const fr = { id: f.id, name: f.name, a: { ...f.a }, b: { ...f.b }, from: f.from, to: f.to, fare: f.fare ?? 0, length: L, modes: f.modes || ['foot', 'horse', 'wheel'] };
+    const fr = { id: f.id, name: f.name, kind: f.kind, period: f.period, a: { ...f.a }, b: { ...f.b }, from: f.from, to: f.to, fare: f.fare ?? 0, length: L, modes: f.modes || ['foot', 'horse', 'wheel'] };
     nav.addLink(f.a.x, f.a.y, f.b.x, f.b.y, { cost: f.cost ?? L * 3 + 80, modes: fr.modes, data: fr });
     return fr;
   });
   await nav.build(prog(0.68, 0.78), yieldFrame);
 
   // ---------------------------------------------------------------- 조회 함수
-  const W = tr.w, H = tr.h, C = tr.cols, g = tr.grid, inv = 1 / tr.cell, bu = tr.bridgeUnder;
+  const W = tr.w, H = tr.h, C = tr.cols, g = tr.grid, inv = 1 / tr.cell, bu = tr.bridgeUnder, cn = tr.cn;
   const idxAt = (x, y) => (x >= 0 && y >= 0 && x < W && y < H ? ((y * inv) | 0) * C + ((x * inv) | 0) : -1);
-  const terrainAt = (x, y) => (x >= 0 && y >= 0 && x < W && y < H ? g[((y * inv) | 0) * C + ((x * inv) | 0)] : T.VOID);
+  // 가장자리 띠(A.1): 그림은 종이로 번지고 지나갈 수 없다
+  const band = (x, y, i) => (x < EDGE_BAND || y < EDGE_BAND || x > W - EDGE_BAND || y > H - EDGE_BAND) && inEdgeBand(x, y, W, H, cn[i]);
+  const terrainAt = (x, y) => {
+    const i = idxAt(x, y);
+    return i < 0 || band(x, y, i) ? T.VOID : g[i];
+  };
 
   const INFO = TERRAIN.map((t) => Object.freeze({ ...t, color: T_MAPCOLOR[t.id] || PAL.grass }));
   const terrainInfo = (id) => INFO[id] || INFO[T.VOID];
@@ -72,7 +111,7 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
 
   function passable(x, y, mode = 'foot') {
     const i = idxAt(x, y);
-    if (i < 0) return false;
+    if (i < 0 || band(x, y, i)) return false;
     const t = g[i];
     if (mode === 'ghost' || mode === 'rail') return t !== T.VOID;
     const p = PASS[mode] || PASS.foot;
@@ -169,40 +208,42 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
     return null;
   }
 
+  // 노선: 정차점은 선 위로 붙이고 d 를 다시 잰다. A.4 부가 데이터(slow, marks, sidings…)는 그대로 넘긴다
   const lines = {};
   for (const ln of M.lines || []) {
     const pts = ln.points;
     const cum = polylineCumulative(pts);
     const stops = (ln.stops || []).map((s) => {
       const c = closestOnPolyline(pts, s.x, s.y, cum);
-      return { id: s.id, name: s.name, d: c.d, x: c.x, y: c.y, sx: s.x, sy: s.y };
+      return { ...s, d: c.d, x: c.x, y: c.y, sx: s.x, sy: s.y };
     });
     stops.sort((a, b) => a.d - b.d);
-    lines[ln.id] = { id: ln.id, name: ln.name, kind: ln.kind, points: pts, cum, length: cum[cum.length - 1], stops };
+    lines[ln.id] = { ...ln, id: ln.id, name: ln.name, kind: ln.kind, points: pts, cum, length: cum[cum.length - 1], stops };
   }
 
-  // ---------------------------------------------------------------- 지역 이름·강물
+  // ---------------------------------------------------------------- 지역 이름(+수배 지역)·강물
   const regions = M.regions || [];
   const settlements = (M.settlements || []).slice().sort((a, b) => a.r - b.r);
-  const REGION_DEFAULT = Object.freeze({ id: 'gyeonggi', name: '경기 들판' });
   const regionObj = new Map();
-  const reg = (id, name) => {
+  const reg = (id, name, wanted) => {
     let o = regionObj.get(id);
-    if (!o) regionObj.set(id, (o = Object.freeze({ id, name })));
+    if (!o) regionObj.set(id, (o = Object.freeze({ id, name, wanted: wanted || 'gyeongin' })));
     return o;
   };
+  // 어디에도 안 들면 「경기 들판」(gyeongin), 강 칸 gyeonggang, 바다 칸 「서해」(jemulpo)
+  const REGION_DEFAULT = reg('gyeonggi', '경기 들판', 'gyeongin');
   function regionAt(x, y) {
     for (const r of regions) {
-      if (r.poly ? pointInPolygon(x, y, r.poly) : (x - r.x) ** 2 + (y - r.y) ** 2 <= (r.r || 0) ** 2) return reg(r.id, r.name);
+      if (r.poly ? pointInPolygon(x, y, r.poly) : (x - r.x) ** 2 + (y - r.y) ** 2 <= (r.r || 0) ** 2) return reg(r.id, r.name, r.wanted);
     }
-    for (const s of settlements) if ((x - s.x) ** 2 + (y - s.y) ** 2 <= s.r * s.r) return reg(s.id, s.name);
+    for (const s of settlements) if ((x - s.x) ** 2 + (y - s.y) ** 2 <= s.r * s.r) return reg(s.id, s.name, s.wanted);
     const t = terrainAt(x, y);
-    if (t === T.SEA) return reg('sea', '서해 바다');
-    if (t === T.RIVER || t === T.SHALLOW) {
+    if (t === T.SEA) return reg('sea', '서해', 'jemulpo');
+    if (t === T.RIVER || t === T.SHALLOW || t === T.REED) {
       const n = tr.riverIndex.nearest(x, y, 160);
-      if (n?.seg?.river?.name) return reg('river_' + n.seg.river.id, n.seg.river.name);
+      if (n?.seg?.river?.name) return reg('river_' + n.seg.river.id, n.seg.river.name, 'gyeonggang');
     }
-    if (t === T.MUD) return reg('mudflat', '갯벌');
+    if (t === T.MUD) return reg('mudflat', '갯벌', 'jemulpo');
     let best = null, bd = Infinity;
     for (const m of M.mountains || []) {
       const d = Math.hypot(x - m.x, y - m.y) / m.r;
@@ -211,22 +252,25 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
         best = m;
       }
     }
-    if (best) return reg('mt_' + best.id, best.name);
+    if (best) return reg('mt_' + best.id, best.name, 'gyeongin');
     return REGION_DEFAULT;
   }
 
+  // 물살 (A.4): 한강 깊은 물 0.5, 얕은 물 0.2, 지류 0.3 m/s, 하류 방향
+  const FLOW = { main: 'han', deep: 0.5, shallow: 0.2, tributary: 0.3, ...(M.flow || {}) };
+  const ZERO = Object.freeze({ x: 0, y: 0 });
   function flowAt(x, y) {
-    const t = terrainAt(x, y);
-    if (t !== T.RIVER && t !== T.SHALLOW && t !== T.BRIDGE) return { x: 0, y: 0 };
+    const i = idxAt(x, y);
+    if (i < 0) return { x: 0, y: 0 };
+    let t = g[i];
+    if (t === T.BRIDGE) t = bu.get(i) ?? T.VOID;
+    if (t !== T.RIVER && t !== T.SHALLOW) return { ...ZERO };
     const n = tr.riverIndex.nearest(x, y, 200);
-    if (!n) return { x: 0, y: 0 };
+    if (!n) return { ...ZERO };
     const sg = n.seg;
-    const half = (sg.wa + (sg.wb - sg.wa) * n.t) * 0.5 + sg.shallow;
-    if (half <= 0) return { x: 0, y: 0 };
-    const k = 1 - (n.dist / half) ** 2;
-    if (k <= 0) return { x: 0, y: 0 };
+    if (n.dist > (sg.wa + (sg.wb - sg.wa) * n.t) * 0.58 + sg.shallow * 1.3 + 3) return { ...ZERO }; // 못·바닷가 얕은 물
+    const v = sg.river.id === FLOW.main ? (t === T.SHALLOW ? FLOW.shallow : FLOW.deep) : FLOW.tributary;
     const L = Math.hypot(sg.bx - sg.ax, sg.by - sg.ay) || 1;
-    const v = 0.7 * k;
     return { x: ((sg.bx - sg.ax) / L) * v, y: ((sg.by - sg.ay) / L) * v };
   }
 
@@ -265,6 +309,13 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
     mapCanvas: null,
     mapScale: 0.5,
     wind: { angle: Math.PI * 0.2, strength: 0.4 },
+    // ---- §10 추가
+    /** 수배 지역 id: hanseong | gyeonggang | gyeongin | jemulpo */
+    wantedRegionAt: (x, y) => regionAt(x, y).wanted,
+    setMapState: (flag, on = true) => setMapState(flag, on),
+    get mapState() {
+      return { ...mapState };
+    },
     // 덤 (계약 밖, 있으면 쓰는 것)
     heightAt: (x, y) => tr.heightAt(x, y),
     underCanopy: (x, y) => st.underCanopy(x, y),
@@ -272,7 +323,12 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
       for (const b of st.queryBuildings(x - r - 1, y - r - 1, x + r + 1, y + r + 1, [])) if (st.underRoof(b, x, y, r)) return b;
       return null;
     },
+    zoneAt(x, y, kind = null) {
+      for (const z of zones) if ((!kind || z.kind === kind) && inZone(z, x, y)) return z;
+      return null;
+    },
     ferries,
+    platforms: tr.platforms,
     gates: tr.gates,
     walls: tr.walls,
     rivers: tr.rivers,
@@ -286,6 +342,101 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
 
   const rnd = new WorldRenderer(tr, st, M, world);
   world.renderer = rnd;
+
+  // ---------------------------------------------------------------- 지도 상태 변화 (A.6)
+  const fx = M.mapStates || {};
+  const mapState = { ...DEFAULT_STATE };
+  const applied = { noRail: false, camp: true, wreck: false };
+  const campBuildings = st.buildings.filter((b) => fx.camp && b.settlement === fx.camp);
+  let wreck = null;
+  const refreshBuildings = () => {
+    st.buildings = st.buildings.slice(); // 새 배열: 목록을 캐시하는 쪽이 바뀐 줄 알게
+    world.buildings = st.buildings;
+  };
+  const touch = (x0, y0, x1, y1) => {
+    rnd.invalidateRect(x0, y0, x1, y1);
+    nav.updateRect(x0, y0, x1, y1);
+  };
+  function applyState(quiet = false) {
+    const s = mapState;
+    const want = {
+      noRail: !!(s.rail_construction && !s.rail_trial && !s.rail_open),
+      camp: !s.rail_open,
+      wreck: !!(s.tram_suspended && !s.tram_resumed),
+    };
+    const changed = [];
+    if (want.noRail !== applied.noRail && fx.construction) {
+      const c = fx.construction;
+      rnd.setRailGaps(c.line, want.noRail ? [[c.d0, c.d1]] : null);
+      const b = st.buildings.find((o) => o.id === c.frame);
+      if (b) {
+        b.frame = want.noRail;
+        rnd.roofs.invalidate(b.id);
+      }
+      changed.push('rail');
+    }
+    if (want.camp !== applied.camp && campBuildings.length) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const b of campBuildings) {
+        if (want.camp) st.addBuilding(b);
+        else st.removeBuilding(b);
+        rnd.roofs.invalidate(b.id);
+        x0 = Math.min(x0, b.x - b._R);
+        y0 = Math.min(y0, b.y - b._R);
+        x1 = Math.max(x1, b.x + b._R);
+        y1 = Math.max(y1, b.y + b._R);
+      }
+      refreshBuildings();
+      touch(x0 - 3, y0 - 3, x1 + 3, y1 + 3);
+      changed.push('camp');
+    }
+    if (want.wreck !== applied.wreck && fx.wreck) {
+      if (want.wreck) {
+        const w = fx.wreck, p = M.places?.find((q) => q.id === w.place) || w, ln = lines[w.line];
+        const c = ln ? closestOnPolyline(ln.points, p.x, p.y, ln.cum) : { x: p.x, y: p.y, angle: 0 };
+        wreck = wreck || { id: 'wreck_tram', kind: 'wreck', name: '불탄 전차', x: c.x, y: c.y, w: w.w ?? 9, h: w.h ?? 2.1, angle: c.angle || 0, tags: ['wreck', 'tram'] };
+        st.addBuilding(wreck);
+      } else if (wreck) st.removeBuilding(wreck);
+      if (wreck) {
+        refreshBuildings();
+        touch(wreck.x - 8, wreck.y - 8, wreck.x + 8, wreck.y + 8);
+      }
+      changed.push('wreck');
+    }
+    Object.assign(applied, want);
+    if (changed.length && !quiet) game.emit?.('map:state', { state: { ...mapState }, changed });
+    return changed;
+  }
+  function setMapState(flag, on = true) {
+    mapState[flag] = !!on;
+    applyState();
+    return { ...mapState };
+  }
+  // game.flags 에 적힌 것으로 맞춘다 (불러오기면 기본값부터)
+  const readFlags = () => {
+    const f = game.flags || {};
+    let diff = false;
+    for (const k of MAP_FLAGS) {
+      if (!(k in f) || !!f[k] === mapState[k]) continue;
+      mapState[k] = !!f[k];
+      diff = true;
+    }
+    return diff;
+  };
+  function syncFlags(reset = false) {
+    if (game.world !== world) return;
+    if (reset) Object.assign(mapState, DEFAULT_STATE);
+    if (readFlags() || reset) applyState();
+  }
+  readFlags();
+  applyState(true);
+  if (game.events?.on) {
+    game.events.on('calendar:date', () => syncFlags());
+    game.events.on('game:start', () => syncFlags());
+    game.events.on('mission:complete', () => syncFlags());
+    game.events.on('save:load', () => syncFlags(true));
+  }
+
   await rnd.buildMapCanvas(0.5, (p) => prog(0.78, 0.98)(p, '지도를 그리는 중'), yieldFrame);
   world.mapCanvas = rnd.mapCanvas;
   world.mapScale = rnd.mapScale;
@@ -296,7 +447,11 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
     fn._worldRenderer = true;
     game.addRenderer(layer, fn, order);
   };
-  addR(LAYER.GROUND, (ctx, gm, view) => rnd.drawGround(ctx, gm, view), 0);
+  let frameN = 0;
+  addR(LAYER.GROUND, (ctx, gm, view) => {
+    if ((++frameN & 63) === 0) syncFlags(); // 플래그를 직접 바꾼 경우도 따라잡는다
+    rnd.drawGround(ctx, gm, view);
+  }, 0);
   addR(LAYER.DECAL, (ctx, gm, view) => rnd.drawWaterAnim(ctx, gm, view), -100);
   addR(LAYER.HIGH, (ctx, gm, view) => rnd.drawRoofs(ctx, gm, view), 0);
   addR(LAYER.HIGH, (ctx, gm, view) => rnd.drawCanopyLayer(ctx, gm, view), 10);

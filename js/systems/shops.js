@@ -1,8 +1,9 @@
 // 상점·시세 [파밍] — game.sys.shops (ARCHITECTURE §5, 스펙 D.3~D.5, G.6 돈 표시).
 //   SHOPS, open(shopId), stock(shopId) → [{itemId, price, n}], buyPrice, sellPrice, buy, sell, formatMoney(jeon)
 //   (추가) isOpen(id), refusal(id) → 거절 문구|null, fare(from, to, cls) → 경인선 운임, ticketFor(from, to) → {cls, from, to}|null,
-//          useTicket(from, to) → 등급|0 (표 한 장 씀), sleepAt(id) 주막·호텔 묵기. 이벤트 'shop:refuse' {shopId, reason}
-// 건물 id·건물의 shop 필드 = 상점 id. 문 앞 E '들어가기', 주막·호텔 문 앞 F '묵기', 상점 NPC(npc.shop) F '거래'.
+//          useTicket(from, to) → 등급|0 (표 한 장 씀), sleepAt(id) 주막·호텔·산채 대청 묵기, restBlock() → 못 쉬는 까닭|null,
+//          stableMenu(id) 마방(말죽·치료 20·맡긴 말 찾기·말 사기). 이벤트 'shop:refuse' {shopId, reason}, 'sleep' {shopId, hours, cost}
+// 건물 id·건물의 shop 필드 = 상점 id. 문 앞 E '들어가기', 주막·호텔·대청 문 앞 F '묵기', 상점 NPC(npc.shop) F '거래'.
 // 매표소는 표만 판다(경인선 운임 C.7, 등급·구간별 줄). 표는 소지품에 ticket_train_<등> 로 들어가고 구간은 여기 tickets 에 적힌다.
 
 import { itemDef, smod, STATIONS } from './items.js';
@@ -18,6 +19,7 @@ const TYPES = {
   fence: { sells: [['mat_powder', 6], ['a_ball', 1]], buys: { v_watch: 0.8, pelt: 0.7, weapon: 0.5, ammo: 0.4 }, hours: [20, 4] },
   ticket: { sells: [], buys: {}, hours: [6, 16 + 40 / 60], flag: 'rail_open' },
   news: { sells: [['q_newspaper', 2]], buys: {}, hours: [6, 18], npcOnly: true },
+  camp: { sells: [], buys: {}, hours: null, sleep: true, free: true, flag: 'prologue_done', bedOnly: true },
 };
 // [상점 id, 종류, 이름, 건물 id, x, y] (D.5)
 const ROWS = [
@@ -39,16 +41,19 @@ const ROWS = [
   ['fence_camp', 'fence', '산채 장물', null, 1500, 2140], ['ticket_noryangjin', 'ticket', '노량진 매표소', 'st_noryangjin', 2400, 1722],
   ['ticket_oryu', 'ticket', '오류동 매표소', 'st_oryu', 1850, 1775], ['ticket_sosa', 'ticket', '소사 매표소', 'st_sosa', 1280, 1770],
   ['ticket_chukhyeon', 'ticket', '축현 매표소', 'st_chukhyeon', 650, 1680], ['ticket_jemulpo', 'ticket', '인천 매표소', 'st_jemulpo', 335, 1640],
-  ['newsboy', 'news', '신문팔이', null, 2900, 797],
+  ['newsboy', 'news', '신문팔이', null, 2900, 797], ['camp_hall', 'camp', '산채 대청', 'hwalbin_hall', 1500, 2128],
 ];
 export const SHOPS = Object.fromEntries(ROWS.map(([id, type, name, building, x, y]) => [id, { id, type, name, building, x, y, ...TYPES[type] }]));
 Object.assign(SHOPS.fence_camp, { hours: null, flag: 'prologue_done', mul: 0.9, npcOnly: true });
 for (const id in SHOPS) if (id.startsWith('ticket_')) SHOPS[id].station = id.slice(7);
+SHOPS.stable_dongdaemun.horses = SHOPS.stable_jemulpo.horses = true; // 말 구입 (C.4)
 // 이름 있는 NPC id → 상점 (npc.shop 이 없을 때)
 const NPC_SHOP = { fence_mapo: 'fence_mapo', ma_cheonbok: 'fence_camp', newsboy_jongno: 'newsboy', newsboy_mapo: 'newsboy', newsboy_jemulpo: 'newsboy' };
 
 const TIER = { noble: [0.9, 1.05], decent: [0.95, 1.02], neutral: [1, 1], rough: [1.05, 0.98], outlaw: [1.15, 0.9] };
 const MELEE = new Set(['w_knife', 'w_club', 'w_hwando']);
+const HORSE_SALE = [['pony', '과하마', 2500], ['jeju_horse', '제주마', 4000]];
+const FLAG_DATE = { rail_open: '1899-09-18' }; // 플래그가 아직 안 켜졌으면 날짜로 판단
 // 경인선 운임 [1등, 2등, 3등] (C.7)
 const ORDER = Object.keys(STATIONS);
 const FARES = {
@@ -133,10 +138,14 @@ class Shops {
     const t = this.game.hour;
     return h[0] < h[1] ? t >= h[0] && t < h[1] : t >= h[0] || t < h[1];
   }
+  flagOn(f) {
+    const g = this.game;
+    return !f || !!g.flags[f] || (!!FLAG_DATE[f] && String(g.flags.date || '') >= FLAG_DATE[f]);
+  }
   refusal(id) {
     const s = SHOPS[id], g = this.game;
     if (!s) return '그런 가게는 없습니다';
-    if (s.flag && !g.flags[s.flag]) return s.type === 'ticket' ? '경인선은 아직 손님을 받지 않습니다' : '아직 거래할 수 없습니다';
+    if (!this.flagOn(s.flag)) return s.type === 'ticket' ? '경인선은 아직 손님을 받지 않습니다' : '아직 거래할 수 없습니다';
     if (!this.isOpen(id)) return `${s.name}: 문을 닫았습니다 (${fmtH(s.hours[0])}~${fmtH(s.hours[1])})`;
     if (s.refuseWanted && (g.sys.wanted?.level ?? 0) > 0) return `${s.name}: 쫓기는 사람은 받지 않소`;
     if (s.refuseOutlaw && this.tier() === 'outlaw') return `${s.name}: 무뢰배와는 거래하지 않소`;
@@ -155,7 +164,7 @@ class Shops {
   }
   buy(id, itemId, n = 1) {
     const g = this.game, inv = g.sys.inventory, r = this._rows(id).find((e) => e.itemId === itemId);
-    if (!r || !inv) return false;
+    if (!r || !inv || this.refusal(id)) return false;
     const real = r.give || itemId, price = this.buyPrice(id, itemId);
     n = Math.min(Math.max(1, n | 0), inv.room?.(real) ?? 99);
     if (n < 1 || !(price > 0) || !inv.spendMoney(price * n, 'buy')) return false;
@@ -199,12 +208,21 @@ class Shops {
   // ------------------------------------------------------------ 묵기 (G.4)
   sleepCost(id) {
     const day = this.game.sys.time?.day ?? 1;
-    return this.fed[id] === day || this.tier() === 'noble' ? 0 : 5;
+    return SHOPS[id]?.free || this.fed[id] === day || this.tier() === 'noble' ? 0 : 5;
+  }
+  /** 쉬기 제한 (C.10): 수배 중, 싸움 중(적 40 m 안·10초 안 피격), 미션이 막을 때 */
+  restBlock() {
+    const g = this.game, p = g.player;
+    if ((g.sys.wanted?.level ?? 0) > 0) return '쫓기는 몸으로는 묵을 수 없습니다';
+    if (g.realTime - (g.sys.stats?.lastHurt ?? -99) < 10 || (p && g.nearest(p.x, p.y, 40, (e) => e.tags?.has('hostile') && e.state === 'normal'))) return '싸움 중에는 쉴 수 없습니다';
+    if (g.sys.missions?.canRest?.() === false) return '지금은 쉴 수 없습니다';
+    return null;
   }
   async sleepAt(id) {
     const g = this.game, s = SHOPS[id], inv = g.sys.inventory, ui = g.sys.ui;
     try {
-      if ((g.sys.wanted?.level ?? 0) > 0) return g.notify('쫓기는 몸으로는 묵을 수 없습니다', 'warn');
+      const why = this.restBlock();
+      if (why) return g.notify(why, 'warn');
       let cost = this.sleepCost(id), deluxe = false;
       if (s.type === 'inn') {
         const i = ui?.choice ? await ui.choice('어느 방에 묵으시겠소?', [`일반실 (${this.formatMoney(200)})`, `상등실 (${this.formatMoney(250)})`, '그만두기']) : 0;
@@ -238,25 +256,62 @@ class Shops {
   provide(actor, t, g) {
     if (!actor?.isPlayer || g.sys.loot?.busy || g.sys.loot?.carried) return null;
     if (t) {
-      if (t.kind !== 'human' || t.state !== 'normal' || t.isPlayer) return null;
+      if (t.kind !== 'human' || t.state !== 'normal' || t.isPlayer || t.hostile) return null;
       const id = this.npcShop(t), s = SHOPS[id];
-      if (!s || (s.flag && !g.flags[s.flag])) return null;
-      return [{ key: 'enter', label: `거래 — ${s.name}`, priority: 3, run: () => this.open(id) }];
+      if (!s || s.bedOnly || !this.flagOn(s.flag)) return null;
+      return [{ key: 'enter', label: `거래 — ${s.name}`, priority: 3, run: () => (s.type === 'stable' ? this.stableMenu(id) : this.open(id)) }];
     }
     let best = null, bd = 2.6;
     for (const d of this.doors) {
       const dd = Math.hypot(d.x - actor.x, d.y - actor.y);
-      if (dd < bd) [bd, best] = [dd, d.shop];
+      if (dd < bd && (!d.shop.bedOnly || this.flagOn(d.shop.flag))) [bd, best] = [dd, d.shop];
     }
     if (!best) return null;
-    const label = best.type === 'ticket' ? `${best.name}에서 표 사기` : `${best.name}에 들어가기`;
-    const out = [{ key: 'interact', label, priority: 2, d: bd, run: () => this.open(best.id) }];
+    const out = [];
+    if (!best.bedOnly) {
+      const label = best.type === 'ticket' ? `${best.name}에서 표 사기` : `${best.name}에 들어가기`;
+      out.push({ key: 'interact', label, priority: 2, d: bd, run: () => (best.type === 'stable' ? this.stableMenu(best.id) : this.open(best.id)) });
+    }
     if (best.sleep) {
       const c = best.type === 'inn' ? '방 고르기' : this.sleepCost(best.id) ? this.formatMoney(5) : '공짜';
       out.push({ key: 'enter', label: `묵기 (${c})`, priority: 2, d: bd, run: () => this.sleepAt(best.id) });
     }
     return out;
   }
+
+  // ------------------------------------------------------------ 마방 (C.4): 말죽 2, 치료 20, 맡긴 말 찾기, 말 사기(동대문·제물포)
+  async stableMenu(id) {
+    const g = this.game, s = SHOPS[id], V = g.sys.vehicles, ph = V?.playerHorse, inv = g.sys.inventory, fm = (n) => this.formatMoney(n);
+    const why = this.refusal(id);
+    if (why) return g.notify(why, 'warn');
+    const door = this.doors.find((d) => d.shop === s) || s, near = ph && Math.hypot(ph.x - door.x, ph.y - door.y) < 30;
+    const pay = (n) => inv?.spendMoney?.(n, 'stable') || (g.notify('돈이 모자랍니다', 'warn'), false);
+    const spot = () => g.world?.randomPassableNear?.(door.x, door.y, 5, 'horse') || { x: door.x, y: door.y + 3 };
+    const acts = [['말죽 사기', () => this.open(id)]];
+    if (near && !ph.stabled && ph.hp < ph.maxHp)
+      acts.push([`말 치료 (${fm(20)})`, () => pay(20) && ((ph.hp = ph.maxHp), ph.addBond?.(5, g), g.notify('마방 주인이 말을 돌봐 주었다', 'good'))]);
+    if (near && ph.stabled && typeof ph.unstable === 'function')
+      acts.push(['맡긴 말 찾기', () => {
+        const pt = spot();
+        ph.unstable(pt.x, pt.y, 0);
+      }]);
+    for (const [vt, name, price] of s.horses && V?.spawn ? HORSE_SALE : [])
+      acts.push([`${name} 사기 (${fm(price)})`, () => {
+        if (!pay(price)) return;
+        const { x, y } = spot(), v = V.spawn(vt, x, y, 0, { owner: 'player' });
+        if (!v) return inv.addMoney(price, 'refund');
+        v.owner = 'player';
+        V.setPlayerHorse?.(v);
+        g.notify(`${name}를 샀다`, 'good');
+      }]);
+    try {
+      const i = acts.length > 1 && g.sys.ui?.choice ? await g.sys.ui.choice(s.name, [...acts.map((a) => a[0]), '그만두기']) : 0;
+      acts[i]?.[1]();
+    } catch (err) {
+      console.warn('[shops] 마방', err?.message);
+    }
+  }
+
   buildDoors() {
     const done = new Set(), byB = {};
     for (const s of Object.values(SHOPS)) if (s.building) byB[s.building] = s.id;

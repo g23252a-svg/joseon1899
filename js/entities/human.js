@@ -315,22 +315,24 @@ export class Human extends Entity {
     if (down) ctx.scale(1.25, 0.8);
     this.drawBody(ctx, this.walkPhase, this.swimming ? 'swim' : this.crouching ? 'crouch' : 'stand');
     ctx.restore();
-    // 적대: 머리 위 붉은 사각 낙관 0.3 m (색맹 대응 — 색이 아니라 모양)
-    if (this.hostile && !down) {
-      const x = this.x - 0.15, y = this.y - 0.95;
-      ctx.fillStyle = 'rgba(168,50,42,0.92)';
-      ctx.fillRect(x, y, 0.3, 0.3);
-      ctx.strokeStyle = '#efe6d2';
-      ctx.lineWidth = 0.025;
-      ctx.strokeRect(x + 0.04, y + 0.04, 0.22, 0.22);
-      ctx.beginPath();
-      ctx.moveTo(x + 0.09, y + 0.11);
-      ctx.lineTo(x + 0.21, y + 0.11);
-      ctx.moveTo(x + 0.15, y + 0.08);
-      ctx.lineTo(x + 0.15, y + 0.23);
-      ctx.stroke();
-    }
+    if (this.hostile && !down) this.drawSeal(ctx, this.x, this.y);
     if (this.speech) this.drawSpeech(ctx, game);
+  }
+
+  /** 적대: 머리 위 붉은 사각 낙관 0.3 m (색맹 대응 — 색이 아니라 모양). (cx, cy) = 사람 중심 */
+  drawSeal(ctx, cx, cy) {
+    const x = cx - 0.15, y = cy - 0.95;
+    ctx.fillStyle = 'rgba(168,50,42,0.92)';
+    ctx.fillRect(x, y, 0.3, 0.3);
+    ctx.strokeStyle = '#efe6d2';
+    ctx.lineWidth = 0.025;
+    ctx.strokeRect(x + 0.04, y + 0.04, 0.22, 0.22);
+    ctx.beginPath();
+    ctx.moveTo(x + 0.09, y + 0.11);
+    ctx.lineTo(x + 0.21, y + 0.11);
+    ctx.moveTo(x + 0.15, y + 0.08);
+    ctx.lineTo(x + 0.15, y + 0.23);
+    ctx.stroke();
   }
 
   /** 원점 기준, +x 가 정면. pose: stand | crouch | swim | ride | sit | row | pull | carry */
@@ -620,6 +622,15 @@ export class Human extends Entity {
   drawSeated(ctx, game, pose = 'sit') {
     if (pose === 'hidden') return;
     this.drawBody(ctx, this.walkPhase, pose);
+    if (this.hostile) {
+      // 좌석 회전을 되돌려 낙관을 화면 위쪽에 세운다
+      const v = this.vehicle, rot = this.aiming ? this.aimAngle : (v?.angle || 0) + (v?.seats?.[this.seatIndex]?.facing || 0);
+      ctx.save();
+      ctx.rotate(-rot);
+      this.drawSeal(ctx, 0, 0);
+      ctx.restore();
+    }
+    if (this.speech) this.drawSpeech(ctx, game);
   }
 
   drawSpeech(ctx, game) {
