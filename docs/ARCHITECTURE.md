@@ -307,3 +307,34 @@ export const MAP = {
 | PIER | 부두·나루 | 1 | 0.9 | 0.9 | ✓(가장자리) | |
 
 `swim` 모드는 SEA·RIVER·SHALLOW 에서만 가능, `rail` 모드는 어디든(노선 차량은 폴리라인을 따라감), `ghost` 는 무시.
+
+## 10. 2차 구현 추가 계약 (스펙 0.3 반영 + 코어 추가분)
+
+스펙 `docs/prototype_spec.md` §0.3 의 표가 이 문서의 계약에 **추가**된다(기존 이름·인자는 그대로). 요점:
+
+- **faction 추가**: `company`(철도·전기 회사 경비), `bounty`(현상금 사냥꾼), `pirate`(한강 수적), `guild`(보부상). 강조색은 `import { FACTION_COLOR } from '../engine/palette.js'`. 적대 표시는 색이 아니라 머리 위 붉은 사각 낙관 0.3 m.
+- **NPC def**: `essential: true`(체력 0 → 죽지 않고 down 15초 뒤 일어나 도주), `fleeAt: 0~1`.
+- **missions step**: `mount{vtype?, moveMode?, role?}`, `kill{tag?, faction?, species?, n, lethal?}`, `collect{itemId, n}`, `survive{seconds, keepAlive?}`, `buy{itemId, shop?}`, escort 는 대상이 탈것에 타 있으면 탈것 위치로 판정. 공통 옵션 `onStart{set, fade{text, teleport}, spawn, say}`, `when{flag, eq}`, `timeout{seconds, then, flag}`, `alt{type,...}`. 미션 공통 `date, time, weather, wind, chain, checkpoint, retry:'nextDay'`.
+- **rewards**: `money, items, honor, xp{tree:n}, flags[], pardon, wanted{level,bounty}, advanceTo:'YYYY-MM-DD HH:MM'`.
+- **wanted**: 범죄 kind `jailbreak`, `arson` 추가, `set(level, bountyAdd, reason)`, 수배 지역 4개(`regions[].wanted`).
+- **time**: `tide`(0~1), `date` 접근자(=`game.flags.date`), `forceWeather(w, hours)`, `forceWind(angle, strength, hours)`. 달력 규칙과 날짜 플래그는 스펙 §0.2 (이벤트 `calendar:date {date}`). 달력 진행은 **missions 시스템**이 맡는다(시각은 time).
+- **vehicles**: `forceArrival(line, stopId, withinSec)`, `requestStop(line, stopId)`, `slowZones`, `sightLimit`, `fastForward(mult)`.
+- **world**: `MAP.sands`, `MAP.reeds`(지형 REED = 20, `T_COUNT` = 21), `walls[].closed`(옹성 = false), `gates[].locked`, `regions[].wanted`, `zones[].ref`, `world.setMapState(flag, on)`(스펙 A.6 지도 상태 변화: rail_construction / rail_trial / rail_open / tram_suspended / tram_resumed).
+- **이벤트 추가**: `horse:down {horse}`, `train:robbery {phase}`, `tram:service {on}`, `calendar:date {date}`.
+
+코어에 이번에 추가된 것:
+- `Human.roll(dx, dy)` — 구르기(Space, 기력 12, 0.45초 1.8 m). 플레이어는 도보에서 Space 로 구른다. `rollT > 0` 이면 구르는 중.
+- 헤엄: 기본 1.1 m/s −1/s, 빠른 헤엄(Shift) `speedSwimFast` 1.6 m/s −5/s, 기력 0 이면 0.6 m/s + 0.5초마다 체력 −2 (`kind: 'drown'`).
+- `Vehicle.trampleThreshold`(기본 3.2), `trampleMul`(기본 1), `tramplePush`(true 면 넘어뜨리지 않고 밀기만), `hitCircles: [{x, y, r}]`(로컬 좌표) + `hitTest(px, py, r)`. 총알·화살 판정은 `target.hitTest?.(x, y, r) ?? 원 판정`.
+- input: `crouch` 는 C 만(Ctrl 제외). 터치 발사·조준 버튼이 `mousePressed(0/2)` 에 반영된다.
+
+## 11. 2차 구현 담당 (스펙 §0.4 예산 8,000줄 이하)
+
+| 담당 | 파일 | 스펙 절 |
+|---|---|---|
+| [지도 정합] | js/world/mapdata.js(A.3 으로 통째 교체), terrain.js(REED·sands·reeds), structures.js(옹성·잠긴 문·건물 종류), world.js(setMapState, regions.wanted, zones.ref) | A, B.5 |
+| [사람] | js/entities/npc.js, js/entities/animals.js, js/systems/spawner.js, human.js 그리기 개선(B.3·B.5 인물) | E.1, G.2 NPC 표, I.2, I.3, C.3 행인 반응 |
+| [탈것] | js/vehicles/horse.js, boat.js, rail.js, carried.js(가마·인력거·소달구지), index.js | C 전부 |
+| [파밍] | js/systems/items.js, inventory.js, loot.js, crafting.js, shops.js | D, E.2, E.3, G.6 돈 표시 |
+| [전투] | js/systems/skills.js, stats.js, combat.js, wanted.js | F, G.1~G.4, G.6 사망·부활 |
+| [미션] | js/systems/missions.js(달력 포함), js/data/story.js, js/data/npcs.js | 0.2, H, I.1, K |

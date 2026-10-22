@@ -59,6 +59,12 @@ export class Human extends Entity {
     this.speedSprint = opts.speedSprint ?? 5.6;
     this.speedCrouch = 1.0;
     this.speedSwim = 1.1;
+    this.speedSwimFast = 1.6;
+    this.speedSwimExhausted = 0.6;
+    this.rollT = 0; // 구르기 남은 시간
+    this.rollVX = 0;
+    this.rollVY = 0;
+    this._drownAcc = 0;
     this.accel = 16;
 
     // 제어 입력 (플레이어 컨트롤러나 NPC 두뇌가 채운다)
@@ -134,8 +140,19 @@ export class Human extends Entity {
       mx /= mag;
       my /= mag;
     }
+    // 구르기: 0.45초 동안 1.8 m 를 정해진 방향으로 (조작 무시)
+    if (this.rollT > 0) {
+      this.rollT -= dt;
+      this.vx = this.rollVX;
+      this.vy = this.rollVY;
+      moveCircle(w, this, this.vx * dt, this.vy * dt, this.moveMode);
+      this.speedNow = Math.hypot(this.vx, this.vy);
+      this.walkPhase += this.speedNow * dt * 3.2;
+      return;
+    }
     let speed = this.speedWalk;
-    if (this.swimming) speed = this.speedSwim;
+    const fastSwim = this.swimming && this.gait === 'sprint' && this.stamina > 1;
+    if (this.swimming) speed = this.stamina <= 0.5 ? this.speedSwimExhausted : fastSwim ? this.speedSwimFast : this.speedSwim;
     else if (this.crouching) speed = this.speedCrouch;
     else if (this.gait === 'sprint' && this.stamina > 1) speed = this.speedSprint;
     else if (this.gait === 'run') speed = this.speedRun;
@@ -151,14 +168,42 @@ export class Human extends Entity {
     this.speedNow = Math.hypot(this.vx, this.vy);
 
     // 기력
-    const sprinting = this.gait === 'sprint' && Math.hypot(mx, my) > 0.1 && !this.crouching;
-    if (sprinting || this.swimming) this.stamina = Math.max(0, this.stamina - (this.swimming ? 4 : 11) * dt * (this.staminaDrainMul ?? 1));
+    const moving = Math.hypot(mx, my) > 0.1;
+    const sprinting = this.gait === 'sprint' && moving && !this.crouching;
+    if (this.swimming) {
+      // 헤엄: 기본 −1/s, 빠른 헤엄 −5/s, 기력이 바닥나면 익사 피해 −4/s
+      this.stamina = Math.max(0, this.stamina - (fastSwim && moving ? 5 : 1.0) * dt * (this.staminaDrainMul ?? 1));
+      if (this.stamina <= 0) {
+        this._drownAcc += dt;
+        if (this._drownAcc >= 0.5) {
+          this._drownAcc -= 0.5;
+          this.damage(2, { kind: 'drown', source: null, x: this.x, y: this.y }, game);
+        }
+      } else this._drownAcc = 0;
+    } else if (sprinting) this.stamina = Math.max(0, this.stamina - 11 * dt * (this.staminaDrainMul ?? 1));
     else this.stamina = Math.min(this.maxStamina, this.stamina + (this.speedNow < 0.2 ? 14 : 8) * dt * (this.staminaRegenMul ?? 1));
 
     // 몸 방향
     if (this.aiming) this.angle = angleApproach(this.angle, this.aimAngle, 14 * dt);
     else if (this.speedNow > 0.15) this.angle = angleApproach(this.angle, Math.atan2(this.vy, this.vx), 10 * dt);
     this.walkPhase += this.speedNow * dt * 3.2;
+  }
+
+  /** 구르기: 기력 12, 0.45초에 1.8 m. 성공하면 true */
+  roll(dirX, dirY) {
+    if (this.state !== 'normal' || this.vehicle || this.swimming || this.rollT > 0 || this.stamina < 12) return false;
+    let d = Math.hypot(dirX, dirY);
+    if (d < 0.1) {
+      dirX = Math.cos(this.angle);
+      dirY = Math.sin(this.angle);
+      d = 1;
+    }
+    this.rollT = 0.45;
+    this.rollVX = (dirX / d) * 4;
+    this.rollVY = (dirY / d) * 4;
+    this.stamina -= 12;
+    this.crouching = false;
+    return true;
   }
 
   /** 넘어뜨리기 (말에 치임, 주먹 등) */

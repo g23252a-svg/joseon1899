@@ -61,6 +61,41 @@ export const PAL = {
   dusk: '#c46a3a',
   rain: 'rgba(90,110,120,0.35)',
   fog: 'rgba(230,226,215,0.5)',
+  // 스펙 B.2 추가 키
+  lantern: '#f2b85b',
+  dawn: '#e8c9a0',
+  paddyRipe: '#cfc77e',
+  reed: '#b8b089',
+  slate: '#6c6f73',
+  jpRoof: '#3e4447',
+  cnBrick: '#7c7a76',
+  sail: '#d4a64a',
+  tiger: '#c98a3c',
+  uniform: '#2b2d33',
+  armyCoat: '#2c3550',
+  jade: '#d8e3dc',
+  jangot: '#6b8a5e',
+  peddlerHat: '#c9b27a',
+  tram: '#7a3b2e',
+  coach1: '#2f3a5a',
+  coach2: '#9a7a3a',
+  coach3: '#6b5a48',
+  ragged: '#8a7f62', // 해진 회갈 (수적·화적 옷)
+};
+
+/** 스펙 B.3: 세력은 작은 강조(띠·두건·완장)와 미니맵 점으로만 구분한다. 적대 표시는 색이 아니라 머리 위 붉은 낙관. */
+export const FACTION_COLOR = {
+  army: '#a8322a',
+  police: '#b08d3c',
+  guild: '#7a913b',
+  hunter: '#427f39',
+  pirate: '#317752',
+  company: '#2e757a',
+  gang: '#3c679f',
+  foreign: '#5c5095',
+  bounty: '#70447e',
+  rival: '#8d356d',
+  civilian: null,
 };
 
 export const FONT = {

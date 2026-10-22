@@ -46,6 +46,24 @@ export class Vehicle extends Entity {
     this.cameraZoom = opts.cameraZoom ?? 1;
     this.wrecked = false;
     this.lastHit = 0;
+    // 행인 치기 (스펙 C.1·C.3): 임계 속도 이상이면 넘어뜨리고 피해 = (속도 − 임계) × 7 × 배수. tramplePush 면 1 m 밀기만
+    this.trampleThreshold = opts.trampleThreshold ?? 3.2;
+    this.trampleMul = opts.trampleMul ?? 1;
+    this.tramplePush = opts.tramplePush ?? false;
+    // 맞음 판정 원 (로컬 좌표, +x 앞): [{x, y, r}]. 없으면 중심 원 하나
+    this.hitCircles = opts.hitCircles || null;
+  }
+
+  /** 월드 점(px,py)과 반지름 r 이 맞음 판정 원에 닿는가 (총알·화살 판정용) */
+  hitTest(px, py, r = 0) {
+    const circles = this.hitCircles;
+    if (!circles || !circles.length) return Math.hypot(px - this.x, py - this.y) <= this.radius + r;
+    const c = Math.cos(this.angle), n = Math.sin(this.angle);
+    for (const h of circles) {
+      const hx = this.x + h.x * c - (h.y || 0) * n, hy = this.y + h.x * n + (h.y || 0) * c;
+      if (Math.hypot(px - hx, py - hy) <= h.r + r) return true;
+    }
+    return false;
   }
 
   // ------------------------------------------------------------ 좌석
@@ -315,10 +333,18 @@ export class Vehicle extends Entity {
   onCollide(other, impact, game) {
     if (other.kind !== 'human' || other.vehicle) return;
     const sp = Math.hypot(this.vx, this.vy);
-    if (sp < 3.2) return;
     const a = Math.atan2(other.y - this.y, other.x - this.x);
+    if (this.tramplePush) {
+      // 소달구지·가마: 넘어뜨리지 않고 1 m 밀기
+      if (sp > 0.3) {
+        other.x += Math.cos(a) * 0.15;
+        other.y += Math.sin(a) * 0.15;
+      }
+      return;
+    }
+    if (sp < this.trampleThreshold) return;
     other.knockDown(Math.cos(a), Math.sin(a), sp * 0.7, 1.8);
-    other.damage((sp - 3) * 7, { kind: 'trample', source: this.driver || this }, game);
+    other.damage(Math.max(0, sp - this.trampleThreshold) * 7 * this.trampleMul, { kind: 'trample', source: this.driver || this }, game);
     const d = this.driver;
     game.events.emit('trample', { vehicle: this, victim: other, driver: d });
     if (d?.isPlayer && other.faction !== 'rival') game.events.emit('crime', { kind: 'assault', x: other.x, y: other.y, offender: d, victim: other });

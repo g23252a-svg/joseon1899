@@ -12,8 +12,8 @@ export const ACTIONS = {
   left: ['KeyA', 'ArrowLeft'],
   right: ['KeyD', 'ArrowRight'],
   sprint: ['ShiftLeft', 'ShiftRight'],
-  brake: ['Space'], // 말 급정지, 배 노 멈춤, 도보에선 점프/구르기
-  crouch: ['KeyC', 'ControlLeft'],
+  brake: ['Space'], // 말 급정지, 배 노 멈춤, 도보에선 구르기
+  crouch: ['KeyC'], // Ctrl 은 쓰지 않는다 (Ctrl+W 로 탭이 닫히는 사고 방지)
   enter: ['KeyF'], // 탈것 타기/내리기/빼앗기
   interact: ['KeyE'], // 대화, 줍기, 가죽 벗기기, 약탈, 상점
   hoan: ['KeyQ'], // 호안(虎眼) 시간 감속 조준

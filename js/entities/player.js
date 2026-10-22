@@ -34,6 +34,7 @@ export class Player extends Human {
     if (input.pressed('CapsLock')) this.walkMode = !this.walkMode;
     this.gait = input.down('sprint') ? 'sprint' : this.walkMode ? 'walk' : 'run';
     if (input.pressed('crouch')) this.crouching = !this.crouching;
+    if (input.pressed('brake') && this.roll(a.x, a.y)) input.consume('brake');
     if (this.gait === 'sprint') this.crouching = false;
   }
 
