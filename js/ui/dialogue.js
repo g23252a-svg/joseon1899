@@ -7,11 +7,18 @@ import { h, reducedMotion, setClass, setHidden, setText } from './dom.js';
 const PUNCT_SLOW = new Set(['.', '!', '?', '…', '。']);
 const PUNCT_MID = new Set([',', '、', '—', '·', ';', ':']);
 
+/** 화자: 문자열, 또는 사람 엔티티·NPC 정의({name})를 넘겨도 이름을 쓴다 ('[object Object]' 가 찍히지 않게) */
+function speakerName(s) {
+  if (s == null || s === false) return '';
+  if (typeof s === 'object') return String(s.name ?? s.displayName ?? '');
+  return String(s);
+}
+
 function normLines(lines) {
   if (lines == null) return [];
   if (!Array.isArray(lines)) lines = [lines];
   return lines
-    .map((l) => (typeof l === 'string' ? { text: l } : l && typeof l === 'object' ? { ...l, text: String(l.text ?? '') } : null))
+    .map((l) => (typeof l === 'string' ? { text: l } : l && typeof l === 'object' ? { ...l, speaker: speakerName(l.speaker), text: String(l.text ?? '') } : null))
     .filter((l) => l && (l.text || l.speaker));
 }
 
@@ -57,14 +64,28 @@ export function createDialogue(ui, game) {
     }
   }
 
+  /** 고른 선택지 단추에 포커스가 남아 있으면(숨은 채로) 놓아 준다. 메뉴가 열려 있지 않으면 게임 화면으로 */
+  function releaseFocus() {
+    try {
+      const ae = document.activeElement;
+      if (!ae || ae === document.body || !box.contains(ae)) return;
+      ae.blur?.();
+      if (!ui.panelOpen) game.canvas?.focus?.({ preventScroll: true });
+    } catch (err) {
+      /* 무시 */
+    }
+  }
+
   function next() {
     cur = queue.shift() || null;
     if (!cur) {
+      releaseFocus();
       setHidden(box, true);
       setPause(false);
       ui._onDialogue?.(false);
       return;
     }
+    if (cur.type !== 'choice') releaseFocus();
     setHidden(box, false);
     ui._onDialogue?.(true);
     setPause(blocks(cur));
@@ -128,7 +149,7 @@ export function createDialogue(ui, game) {
 
   function showChoice() {
     const opts = cur.options;
-    setSpeaker(cur.opts?.speaker, cur.opts?.portrait);
+    setSpeaker(speakerName(cur.opts?.speaker), cur.opts?.portrait);
     full = cur.question || '';
     shown = full.length;
     lineDone = true;
@@ -199,13 +220,18 @@ export function createDialogue(ui, game) {
         }
       }
       if (cur?.type === 'choice') {
-        if (inp.pressed('up')) highlight(hi - 1, true);
-        if (inp.pressed('down')) highlight(hi + 1, true);
-        if (inp.pressed('interact') || inp.pressed('brake') || inp.pressed('confirm')) pick(hi);
+        // 멈추지 않는 선택지(pause:false): W·S·Space 는 걷기·급정지에 쓰이므로 고르기에 쓰지 않는다 (숫자·E·Enter·클릭만)
+        if (blocking && inp.pressed('up')) highlight(hi - 1, true);
+        if (blocking && inp.pressed('down')) highlight(hi + 1, true);
+        if (inp.pressed('interact') || inp.pressed('confirm') || (blocking && inp.pressed('brake'))) pick(hi);
       }
     }
+    if (!blocking) {
+      // 멈추지 않는 선택지: 고르기에 쓴 키(E·Enter·숫자 1·2)만 먹는다. 걷기·급정지·마우스는 그대로 둔다
+      for (const a of ['interact', 'confirm', 'weaponNext', 'weaponPrev']) inp.consume(a);
+      return true;
+    }
     for (const a of ['interact', 'confirm', 'brake', 'enter', 'up', 'down', 'weaponNext', 'weaponPrev']) inp.consume(a);
-    if (!blocking) return true; // 멈추지 않는 선택지: 마우스는 싸움에 그대로 둔다
     inp.mouse.pressed[0] = false;
     // 화면을 눌러 마지막 줄을 넘기면 대화가 닫힌 뒤에도 단추가 아직 눌려 있다: 다시 누를 때까지 '누름' 으로 치지 않는다
     // (그대로 두면 멈춤이 풀리자마자 combat 이 mouseDown(0) 을 보고 쏜다)

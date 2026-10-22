@@ -216,6 +216,7 @@ export function buildCSS() {
 /* ---------- 대화창 ---------- */
 .jx-dlg { position: absolute; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(880px, calc(100% - 24px)); min-height: 128px; padding: 22px 28px 26px; z-index: 9; pointer-events: auto; cursor: pointer; animation: jx-dlg-in 0.25s ease-out; box-shadow: 0 10px 28px ${inkA(0.28)}; }
 .jx-dlg.jx-choosing { cursor: default; }
+.jx-dlg.jx-choosing .jx-dlg-text { min-height: 0; }
 @keyframes jx-dlg-in { from { opacity: 0; transform: translate(-50%, 14px); } }
 .jx-dlg-speaker { position: absolute; top: -18px; left: 24px; padding: 6px 14px 7px; font-size: 17px; letter-spacing: 0.1em; transform: rotate(-1.5deg); box-shadow: 2px 2px 0 ${inkA(0.25)}; }
 .jx-dlg-body { display: flex; gap: 16px; align-items: flex-start; }
@@ -273,6 +274,10 @@ export function buildCSS() {
 .jx-inv { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 20px; height: 100%; }
 .jx-inv.jx-solo { grid-template-columns: minmax(0, 1fr); }
 .jx-inv.jx-solo .jx-detail { display: none; }
+.jx-inv-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.jx-inv-main > .jx-inv-list { flex: 1 1 auto; }
+.jx-wallet { display: none; font-family: var(--jx-display); font-size: 15px; color: var(--jx-ink2); white-space: nowrap; }
+.jx-wallet:empty { display: none !important; }
 .jx-inv-list { min-height: 0; overflow: auto; padding-right: 4px; touch-action: pan-y; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 4px 24px; }
 .jx-cat { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-bottom: 12px; }
 .jx-cat .jx-sec-h { white-space: nowrap; }
@@ -352,6 +357,9 @@ export function buildCSS() {
 .jx-srow:hover { background: ${inkA(0.05)}; }
 .jx-srow[aria-pressed='true'] { background: ${inkA(0.08)}; box-shadow: inset 3px 0 0 var(--jx-seal); }
 .jx-srow canvas { width: 32px; height: 32px; }
+.jx-srow.jx-soldout { color: var(--jx-ink3); }
+.jx-srow.jx-soldout canvas { opacity: 0.45; }
+.jx-srow.jx-soldout .jx-price { text-decoration: line-through; text-decoration-color: ${inkA(0.5)}; }
 .jx-srow .jx-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jx-srow .jx-nm small { margin-left: 6px; color: var(--jx-ink3); font-size: 12px; }
 .jx-price { font-family: var(--jx-display); white-space: nowrap; }
@@ -461,7 +469,10 @@ export function buildCSS() {
   .jx-panel-title { font-size: 20px; }
   .jx-panel-body { padding: 14px 12px; }
   .jx-inv { display: flex; flex-direction: column; gap: 10px; }
-  .jx-inv-list { flex: 1 1 auto; min-height: 96px; }
+  .jx-inv-main { flex: 1 1 auto; min-height: 96px; }
+  .jx-wallet { display: block; }
+  .jx-inv-main > .jx-wallet { margin-bottom: 10px; }
+  .jx-trade > .jx-wallet { flex-basis: 100%; font-size: 14px; }
   .jx-detail { flex: 0 0 auto; }
   .jx-inv-list { gap: 2px 16px; }
   .jx-cell { width: 62px; height: 62px; }

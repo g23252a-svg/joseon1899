@@ -285,6 +285,12 @@ export function install(game) {
     x = Number(x);
     y = Number(y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    // 지도 밖 좌표는 지도 가장자리로 붙인다 (다다를 수 없는 길잡이가 되지 않게)
+    const ws = game.world?.size;
+    if (ws && ws.w > 0 && ws.h > 0) {
+      x = Math.min(ws.w, Math.max(0, x));
+      y = Math.min(ws.h, Math.max(0, y));
+    }
     game.waypoint = { x, y };
     game.emit('waypoint', { x, y, set: true, reached: false });
     game.sfx?.('ui_click');

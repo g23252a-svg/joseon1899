@@ -35,7 +35,9 @@ export const ACTIONS = {
 };
 
 // 브라우저 기본 동작을 막을 키
-const PREVENT = new Set(['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyF', 'Backquote']);
+const PREVENT = new Set(['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyF', 'Backquote', 'Enter', 'NumpadEnter']);
+// 손가락 탭 뒤에 브라우저가 흉내 내는 마우스 이벤트를 무시할 시간(ms)
+const TOUCH_MOUSE_GHOST_MS = 700;
 
 export class Input {
   constructor(canvas) {
@@ -50,6 +52,7 @@ export class Input {
     this.mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: [false, false, false], pressed: [false, false, false], released: [false, false, false], wheel: 0, inside: false };
     this.enabled = true; // UI 가 텍스트 입력 등을 받을 때 false
     this.lastDevice = 'keyboard';
+    this._lastTouch = -1e9;
     this._bind();
   }
 
@@ -68,7 +71,14 @@ export class Input {
     window.addEventListener('blur', () => {
       this.keys.clear();
       this.mouse.down = [false, false, false];
+      this.virtual.clear();
+      this.virtualAxis = null;
     });
+    // 터치 직후의 흉내 마우스 이벤트 구분용
+    window.addEventListener('touchstart', () => (this._lastTouch = performance.now()), { passive: true, capture: true });
+    window.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch') this._lastTouch = performance.now();
+    }, { capture: true });
     const c = this.canvas;
     c.addEventListener('mousemove', (e) => {
       const r = c.getBoundingClientRect();
@@ -78,6 +88,7 @@ export class Input {
     });
     c.addEventListener('mouseleave', () => (this.mouse.inside = false));
     c.addEventListener('mousedown', (e) => {
+      if (performance.now() - this._lastTouch < TOUCH_MOUSE_GHOST_MS) return; // 탭이 만든 가짜 클릭
       this.mouse.down[e.button] = true;
       this.mouse.pressed[e.button] = true;
       this.lastDevice = 'keyboard';
@@ -162,7 +173,10 @@ export class Input {
   }
 
   mousePressed(btn = 0) {
-    return this.enabled && this.mouse.pressed[btn];
+    if (!this.enabled) return false;
+    if (btn === 0 && this.virtualPressed.has('fire')) return true;
+    if (btn === 2 && this.virtualPressed.has('aim')) return true;
+    return this.mouse.pressed[btn];
   }
   mouseDown(btn = 0) {
     return this.enabled && (this.mouse.down[btn] || (btn === 0 && this.virtual.get('fire')) || (btn === 2 && this.virtual.get('aim')));

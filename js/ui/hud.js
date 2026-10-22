@@ -575,6 +575,8 @@ export function createHud(ui, game) {
       mx = s.x;
       my = s.y;
     }
+    // 조준각·좌표가 깨졌으면(NaN) 그리지 않는다 (translate(NaN) 은 무시되어 화면 왼쪽 위 구석에 그려진다)
+    if (!Number.isFinite(mx) || !Number.isFinite(my)) return;
     const firing = inp.mouseDown(0);
     const r = 11 + (firing ? 3 : 0);
     ctx.save();

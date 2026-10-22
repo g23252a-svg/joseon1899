@@ -1,7 +1,7 @@
 // 기술 화면: game.sys.skills.TREES 를 계통별 열로. 노드(배움/익힐 수 있음/잠김), 경험치 막대, 점수, [배우기].
 // TREES 형식이 아직 확정되지 않아 배열/객체, skills|nodes|perks 모두 받아들인다.
 
-import { clamp01, emptyNote, h, safe } from './dom.js';
+import { clamp01, emptyNote, h, keepFocus, safe } from './dom.js';
 
 function nodeList(raw) {
   if (!raw) return [];
@@ -51,8 +51,11 @@ function reqText(n, tree, trees) {
   let r = n.requires ?? n.req?.skills ?? n.prereq;
   if (typeof r === 'string') r = [r];
   if (Array.isArray(r)) {
-    for (const id of r) {
-      let name = id;
+    for (const raw of r) {
+      // 선행 기술이 {id} 객체로 와도 이름을 찾는다 ('[object Object]' 방지)
+      const id = raw && typeof raw === 'object' ? raw.id : raw;
+      if (id == null) continue;
+      let name = String(id);
       for (const t of trees) {
         const f = t.nodes.find((x) => x.id === id);
         if (f) name = f.name ?? f.title ?? id;
@@ -74,7 +77,10 @@ export function createSkillsView(c) {
     return 'locked';
   }
 
-  function refresh() {
+  // 노드를 누르면 화면을 다시 그리므로 포커스를 같은 노드(배운 뒤에는 고른 노드)로 돌려준다
+  const refresh = () => keepFocus(el, render, '.jx-node[aria-pressed="true"]');
+
+  function render() {
     el.textContent = '';
     const sk = game.sys.skills;
     const trees = treesOf(sk);
@@ -116,6 +122,7 @@ export function createSkillsView(c) {
             {
               class: 'jx-node',
               type: 'button',
+              'data-fk': `n:${n.id}`,
               'data-st': st,
               'aria-pressed': n.id === sel ? 'true' : 'false',
               'aria-label': `${n.name ?? n.id}, ${st === 'learned' ? '익힘' : st === 'open' ? '익힐 수 있음' : '잠김'}`,
@@ -147,6 +154,7 @@ export function createSkillsView(c) {
         class: 'jx-btn jx-primary',
         type: 'button',
         text: st === 'learned' ? '이미 익힘' : '배우기',
+        'data-fk': 'learn',
         disabled: st !== 'open',
         onclick: () => {
           const ok = safe(() => sk.learn?.(selNode.id), false);

@@ -1,7 +1,8 @@
 // 시각·낮밤·날씨·바람 [분위기] + 조명·날씨 화면 연출.
 //
 //   game.sys.time.hour(0~24 실수) .day .minutesPerDay(실시간 분, 기본 48) .light(0~1) .weather .wind{angle, strength}
-//   isNight()  setHour(h)  skip(hours)  curfew()  setWeather(w, {instant, lock})
+//   isNight()  setHour(h)  skip(hours)  curfew()  setCurfew(on)  setWeather(w, {instant, lock})
+//   curfew(): 기본 false — 인정·파루 통금은 1895년에 폐지됐다. setCurfew(true) 로 켜면 인정(22시)~파루(4시)에 true.
 //   이벤트 'time:hour' {hour, day, set?} · 'time:day' {day} · 'weather:change' {weather, prev}
 //     (set: true 는 setHour·불러오기로 시각을 '맞춘' 경우 — 흘러서 지난 정시가 아님)
 //   game.lights: 다른 모듈이 {x, y, r, color?, intensity?, on?} 를 넣으면 밤에 그 자리가 밝아진다.
@@ -91,8 +92,8 @@ class TimeSystem {
     this.weatherLocked = false;
     this.wind = { angle: -0.8, strength: 0.28 };
     this.windHome = -0.8; // 남서풍
-    // 계약(ARCHITECTURE §5): curfew() = 인정(22시)~파루(4시) 사이인가. 통금을 없애려면 setCurfew(false)
-    this.curfewEnabled = true;
+    // 통금: 1895년 폐지되어 기본은 꺼짐. 이야기·설정으로 켜면 curfew() 가 인정(22시)~파루(4시)에 true
+    this.curfewEnabled = false;
     this.curfewStart = 22;
     this.curfewEnd = 4;
     this.frozen = false; // true 면 시계가 멈춤(컷신 등)
@@ -201,7 +202,7 @@ class TimeSystem {
       weatherLocked: this.weatherLocked,
       wind: { angle: this.wind.angle, strength: this.wind.strength },
       season: this.season,
-      curfewEnabled: this.curfewEnabled,
+      curfewOn: this.curfewEnabled,
     };
   }
   deserialize(d) {
@@ -209,7 +210,7 @@ class TimeSystem {
     if (Number.isFinite(d.day)) this.day = Math.max(1, Math.floor(d.day));
     if (Number.isFinite(d.hour)) this.hour = ((d.hour % 24) + 24) % 24;
     if (typeof d.season === 'string') this.season = d.season;
-    if (typeof d.curfewEnabled === 'boolean') this.curfewEnabled = d.curfewEnabled;
+    if (typeof d.curfewOn === 'boolean') this.curfewEnabled = d.curfewOn; // 옛 키 curfewEnabled 는 기본값이 달라 무시
     this.weatherLocked = !!d.weatherLocked;
     if (d.wind && Number.isFinite(d.wind.angle)) this.wind.angle = d.wind.angle;
     if (d.wind && Number.isFinite(d.wind.strength)) this.wind.strength = clamp(d.wind.strength, 0, 1);
@@ -251,6 +252,9 @@ class TimeSystem {
 
   _advance(dh) {
     if (!(dh > 0) || !Number.isFinite(dh)) return; // Infinity 면 아래 날짜 계산이 끝나지 않는다
+    // 다른 모듈이 hour/day 를 직접 음수·NaN 으로 써 넣었으면 바로잡는다 (시계 글자·통금 비교가 깨지지 않게)
+    if (!(this.hour >= 0)) this.hour = Number.isFinite(this.hour) ? ((this.hour % 24) + 24) % 24 : 12;
+    if (!(this.day >= 1)) this.day = 1;
     this.hour += dh;
     if (this.hour >= 24) {
       const days = Math.floor(this.hour / 24);
@@ -328,11 +332,12 @@ class TimeSystem {
       this._flashAt = game.realTime;
       this._flashPow = rand.range(0.6, 1);
       const delay = rand.range(0.4, 3);
-      this._thunder.push({ at: game.realTime + delay, near: 1 - delay / 3.4, vol: rand.range(0.6, 1) });
+      this._thunder.push({ left: delay, near: 1 - delay / 3.4, vol: rand.range(0.6, 1) });
     }
+    // 남은 시간을 실시간으로 깎는다: 메뉴로 멈춘 동안엔 기다렸다가 풀린 뒤 제때 울린다 (한꺼번에 몰려 터지지 않게)
     for (let i = this._thunder.length - 1; i >= 0; i--) {
       const th = this._thunder[i];
-      if (game.realTime >= th.at) {
+      if ((th.left -= realDt) <= 0) {
         this._thunder.splice(i, 1);
         game.sfx?.('thunder', { volume: th.vol, near: th.near });
       }
@@ -465,7 +470,7 @@ class TimeSystem {
         g.addColorStop(evening ? 1 : 0, rgba(col, 0.3));
         this._duskG = { key, g };
       }
-      ctx.globalAlpha = dusk * 0.2;
+      ctx.globalAlpha = dusk * 0.28;
       ctx.fillStyle = this._duskG.g;
       ctx.fillRect(0, 0, W, H);
       ctx.globalAlpha = 1;

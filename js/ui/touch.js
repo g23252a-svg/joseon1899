@@ -24,6 +24,7 @@ export function createTouch(ui, game) {
   const R = 54;
   let stickId = null;
   let base = { x: 0, y: 0 };
+  let zoneRect = null; // 누르는 동안 막대 영역 위치 (pointermove 마다 레이아웃을 읽지 않게)
   let shown = false;
   const held = new Map(); // action → Set(pointerId)
   const btnEls = [];
@@ -36,7 +37,7 @@ export function createTouch(ui, game) {
   homeStick();
 
   function moveStick(e) {
-    const r = zone.getBoundingClientRect();
+    const r = zoneRect || zone.getBoundingClientRect();
     let dx = e.clientX - r.left - base.x, dy = e.clientY - r.top - base.y;
     const len = Math.hypot(dx, dy);
     if (len > R) {
@@ -58,7 +59,7 @@ export function createTouch(ui, game) {
     } catch (err) {
       /* 무시 */
     }
-    const r = zone.getBoundingClientRect();
+    const r = (zoneRect = zone.getBoundingClientRect());
     base = { x: e.clientX - r.left, y: e.clientY - r.top };
     setStyle(stick, 'left', `${base.x}px`);
     setStyle(stick, 'top', `${base.y}px`);
@@ -71,6 +72,7 @@ export function createTouch(ui, game) {
   const endStick = (e) => {
     if (e && e.pointerId !== stickId) return;
     stickId = null;
+    zoneRect = null;
     game.input.setVirtualAxis(0, 0);
     setClass(stick, 'jx-active', false);
     homeStick();
@@ -124,6 +126,20 @@ export function createTouch(ui, game) {
     b.addEventListener('contextmenu', (e) => e.preventDefault?.());
     cluster.append(b);
     btnEls.push({ b, d, ids });
+  }
+
+  // 터치 조작이 보일 때 게임 화면을 손가락으로 건드리면 브라우저가 흉내 낸 마우스 누름이 생겨
+  // 코어 Input 이 '발사' 로 읽는다. 쏘기는 공격 단추로만 하게 막는다.
+  try {
+    game.canvas?.addEventListener?.(
+      'touchstart',
+      (e) => {
+        if (shown && e.cancelable) e.preventDefault();
+      },
+      { passive: false }
+    );
+  } catch (err) {
+    /* 무시 */
   }
 
   function releaseAll() {

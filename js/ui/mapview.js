@@ -105,7 +105,10 @@ export function createMapView(c) {
   }
 
   // ---------------------------------------------------------------- 포인터 (마우스·터치 공통)
+  // 오른쪽·가운데 단추는 무시한다 (오른쪽 누름이 길잡이를 놓고 브라우저 메뉴까지 띄우던 것)
+  cv.addEventListener('contextmenu', (e) => e.preventDefault?.());
   cv.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
     try {
       cv.setPointerCapture?.(e.pointerId);
     } catch (err) {
@@ -289,7 +292,8 @@ export function createMapView(c) {
     }
 
     // 길잡이 + 플레이어
-    const p = game.player;
+    // 좌표가 깨진(NaN) 플레이어는 그리지 않는다 (translate(NaN) 이 무시되어 지도 왼쪽 위 구석에 화살표가 찍힌다)
+    const p = game.player && Number.isFinite(game.player.x) && Number.isFinite(game.player.y) ? game.player : null;
     const wp = game.waypoint;
     if (p && wp && typeof wp.x === 'number') {
       const [ax, ay] = tf(p.x, p.y), [bx, by] = tf(wp.x, wp.y);
@@ -428,7 +432,10 @@ export function createMapView(c) {
     handleInput(inp) {
       if (inp.pressed('zoomIn')) zoomBy(1.4);
       if (inp.pressed('zoomOut')) zoomBy(1 / 1.4);
-      if (inp.pressed('confirm') && keyPan) {
+      // 지도 단추(+ − ◎ 지우기)에 포커스가 있으면 Enter 는 그 단추를 누른 것이다
+      const ae = document.activeElement;
+      const onCtl = !!ae && ae !== cv && ae.tagName === 'BUTTON' && el.contains(ae);
+      if (inp.pressed('confirm') && keyPan && !onCtl) {
         clickAt(W / 2, H / 2);
         updateTip();
       }

@@ -259,7 +259,7 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
     lines,
     regionAt,
     flowAt,
-    findPath: (x0, y0, x1, y1, mode = 'foot', maxNodes = 6000) => nav.findPath(x0, y0, x1, y1, mode, maxNodes),
+    findPath: (x0, y0, x1, y1, mode = 'foot', maxNodes = 6000) => nav.findPath(x0, y0, x1, y1, mode || 'foot', maxNodes > 0 ? maxNodes : 6000),
     randomPassableNear,
     nearestRoadPoint,
     mapCanvas: null,
@@ -290,10 +290,16 @@ export async function createWorld(game, onProgress = () => {}, mapData = MAP) {
   world.mapCanvas = rnd.mapCanvas;
   world.mapScale = rnd.mapScale;
 
-  game.addRenderer(LAYER.GROUND, (ctx, gm, view) => rnd.drawGround(ctx, gm, view), 0);
-  game.addRenderer(LAYER.DECAL, (ctx, gm, view) => rnd.drawWaterAnim(ctx, gm, view), -100);
-  game.addRenderer(LAYER.HIGH, (ctx, gm, view) => rnd.drawRoofs(ctx, gm, view), 0);
-  game.addRenderer(LAYER.HIGH, (ctx, gm, view) => rnd.drawCanopyLayer(ctx, gm, view), 10);
+  // 월드를 다시 만들면(새 지도 등) 앞 월드의 렌더러는 뺀다
+  if (Array.isArray(game.renderers)) game.renderers = game.renderers.filter((r) => !r.fn?._worldRenderer);
+  const addR = (layer, fn, order) => {
+    fn._worldRenderer = true;
+    game.addRenderer(layer, fn, order);
+  };
+  addR(LAYER.GROUND, (ctx, gm, view) => rnd.drawGround(ctx, gm, view), 0);
+  addR(LAYER.DECAL, (ctx, gm, view) => rnd.drawWaterAnim(ctx, gm, view), -100);
+  addR(LAYER.HIGH, (ctx, gm, view) => rnd.drawRoofs(ctx, gm, view), 0);
+  addR(LAYER.HIGH, (ctx, gm, view) => rnd.drawCanopyLayer(ctx, gm, view), 10);
 
   prog(0, 1)(1, '');
   return world;

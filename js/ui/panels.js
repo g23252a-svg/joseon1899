@@ -2,7 +2,7 @@
 // 좁은 화면(폭 < 640px)은 전체 화면. 상점·쉬어가기는 탭 없이 제목만.
 // 여기에는 틀과 쉬어가기·도움말·일지 화면이 있다. 소지품·제작·상점은 goods.js, 기술은 skillsview.js, 지도는 mapview.js.
 
-import { append, dirWord, distWord, emptyNote, formatMoney, h, safe, setAttr, setHidden, setText } from './dom.js';
+import { append, dirWord, distWord, emptyNote, formatMoney, h, keepFocus, safe, setAttr, setHidden, setText } from './dom.js';
 import { createCraftView, createInventoryView, createShopView } from './goods.js';
 import { createMapView } from './mapview.js';
 import { createSkillsView } from './skillsview.js';
@@ -43,7 +43,11 @@ export function createPanels(ui, game, hooks = {}) {
   const panel = h('section', { class: 'jx-panel', role: 'dialog', 'aria-modal': 'true', 'aria-label': '메뉴' }, h('div', { class: 'jx-panel-in jx-paper' }, head, body));
   const wrap = h('div', { class: 'jx-panel-wrap jx-gone' }, panel);
   wrap.addEventListener('pointerdown', (e) => {
-    if (e.target === wrap) close();
+    if (e.target !== wrap) return;
+    // 터치: 손가락을 뗄 때 브라우저가 흉내 내는 mousedown 이 (이미 닫혀 사라진 바탕 대신) 게임 화면에 떨어져
+    // 코어 Input 이 '발사' 로 읽는다. pointerdown 을 막으면 흉내 마우스 누름이 생기지 않는다.
+    e.preventDefault?.();
+    close();
   });
   // 슬라이더(INPUT) 에서는 코어 Input 이 키를 무시하므로 Esc 만 따로 받는다
   wrap.addEventListener('keydown', (e) => {
@@ -76,7 +80,9 @@ export function createPanels(ui, game, hooks = {}) {
   };
   const views = {};
   let current = null;
+  let curArg; // 열린 화면의 인자 (상점 id 등)
   let queued = false;
+  let headMoney; // 머리의 돈 표시에 마지막으로 쓴 값 (undefined = 아직 안 씀)
 
   const ctx = {
     game,
@@ -100,7 +106,14 @@ export function createPanels(ui, game, hooks = {}) {
     }
     // 처음 화면에서 연 도움말의 탭으로 소지품·지도 등을 열지 못하게 (ui.openPanel 과 같은 규칙)
     if (hooks.canOpen && !hooks.canOpen(name)) return false;
+    // 이미 열린 화면을 또 열면(포커스된 탭에서 Enter 등) 다시 꾸리지 않고 내용만 새로 그린다.
+    // (다시 꾸리면 지도가 내 자리로 되돌아가 버린다)
+    if (current === name && arg === curArg) {
+      queued = true;
+      return true;
+    }
     const was = current;
+    curArg = arg;
     if (was) {
       try {
         views[was]?.unmount?.();
@@ -127,6 +140,7 @@ export function createPanels(ui, game, hooks = {}) {
     if (tab) ctx.setTitle(tab.label);
     else ctx.setTitle(v.title || '', v.hanja || '');
     setHidden(moneyEl, !v.money);
+    headMoney = undefined; // 열 때마다 한 번은 새로 쓴다
     setHidden(wrap, false);
     // 여닫는 소리는 audio 가 'ui:panel' 이벤트를 듣고 낸다
     if (!was) game.pause('ui');
@@ -159,6 +173,7 @@ export function createPanels(ui, game, hooks = {}) {
       console.error('[ui panel unmount]', err);
     }
     current = null;
+    curArg = undefined;
     setHidden(wrap, true);
     body.textContent = '';
     game.resume('ui');
@@ -191,8 +206,13 @@ export function createPanels(ui, game, hooks = {}) {
       if (!current) return;
       const v = views[current];
       if (v?.money) {
+        // 돈 글자는 값이 바뀔 때만 만든다 (shops.formatMoney 를 매 프레임 부르지 않게)
         const m = game.sys.inventory?.money;
-        setText(moneyEl, typeof m === 'number' ? formatMoney(game, m) : '');
+        const mv = typeof m === 'number' ? m : null;
+        if (mv !== headMoney) {
+          headMoney = mv;
+          setText(moneyEl, mv == null ? '' : formatMoney(game, mv));
+        }
       }
       if (queued) {
         queued = false;
@@ -422,7 +442,10 @@ function createJournalView(c) {
     );
   }
 
-  function refresh() {
+  // '길잡이 놓기' → 'waypoint' 이벤트 → 다시 그리기: 포커스를 같은 단추로 돌려준다
+  const refresh = () => keepFocus(el, render);
+
+  function render() {
     el.textContent = '';
     const m = game.sys.missions;
     const obj = safe(() => m?.objectiveText?.(), '') || '';
@@ -459,7 +482,7 @@ function createJournalView(c) {
               'article',
               { class: 'jx-entry' },
               h('h4', { text: a.title || a.id || '소문' }),
-              h('button', { class: 'jx-btn', type: 'button', text: '길잡이 놓기', onclick: () => ui.setWaypoint(a.x, a.y) }),
+              h('button', { class: 'jx-btn', type: 'button', 'data-fk': `wp:${a.id ?? a.title}`, text: '길잡이 놓기', onclick: () => ui.setWaypoint(a.x, a.y) }),
               where ? h('p', { text: where }) : null
             );
           })

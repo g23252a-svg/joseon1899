@@ -687,7 +687,7 @@ class AudioSystem {
       if (d > 12) lp = 400 + 17000 * k * k; // 멀수록 먹먹하게
       wet = Math.min(0.6, wet + (1 - k) * 0.35);
     }
-    if (vol < 0.004) return false;
+    if (!(vol >= 0.004)) return false; // NaN(듣는 이 좌표가 망가진 경우)도 여기서 거른다
     this._last[key] = now;
     const p0 = Number(opts.pitch ?? 1);
     const pitch = (Number.isFinite(p0) && p0 > 0 ? clamp(p0, 0.05, 8) : 1) * (this._muffled ? 0.86 : 1);
@@ -783,7 +783,8 @@ class AudioSystem {
   _tick(rdt, paused) {
     const g = this.game;
     this._loading = false; // 불러오기가 도중에 실패해 'save:load' 가 안 와도 다음 틱엔 풀린다
-    if (g.input?.pressed?.('KeyN')) this.toggleMute();
+    // N 키 (코어 ACTIONS 에 'mute' 가 생기면 그것도 받는다)
+    if (g.input?.pressed?.('mute') || g.input?.pressed?.('KeyN')) this.toggleMute();
     const c = this.ctx;
     if (!c || c.state !== 'running') return;
     this._t += rdt;
@@ -1443,7 +1444,7 @@ class AudioSystem {
     if (w && typeof w === 'object') return w;
     const W = this.game.sys.combat?.WEAPONS;
     if (!w || !W) return null;
-    return Array.isArray(W) ? W.find((x) => x?.id === w) || null : W[w] || null;
+    return Array.isArray(W) ? W.find((x) => x?.id === w) || null : own(W, w) || null;
   }
   _weaponKind(w) {
     const def = this._weaponDef(w);
@@ -1687,7 +1688,8 @@ class AudioSystem {
       this._hoofT = this._railT = 0;
       return;
     }
-    const sp = Math.abs(Number.isFinite(v.speed) ? v.speed : Math.hypot(v.vx || 0, v.vy || 0));
+    let sp = Math.abs(Number.isFinite(v.speed) ? v.speed : Math.hypot(v.vx || 0, v.vy || 0));
+    if (!Number.isFinite(sp)) sp = 0; // NaN 이면 _hoofT 가 NaN 에 갇혀 발굽 소리가 영영 멈춘다
     if (this.auto.hooves && (HORSES.has(v.vtype) || v.moveMode === 'horse')) {
       if (sp < 0.35) this._hoofT = 0;
       else {

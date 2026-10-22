@@ -263,6 +263,8 @@ export function shuffle(arr, rng = rand) {
 /** 0 ~ 24 시각을 "해시 (亥時)" 같은 십이시 이름으로 */
 const SIJIN = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
 export function sijin(hour) {
-  const idx = Math.floor(((hour + 1) % 24) / 2);
+  if (!Number.isFinite(hour)) return '';
+  const h = ((hour % 24) + 24) % 24;
+  const idx = Math.floor(((h + 1) % 24) / 2);
   return SIJIN[idx] + '시';
 }

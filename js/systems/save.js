@@ -8,6 +8,7 @@
 //   자동 저장은 물 위(헤엄·배)에서는 미룬다. 불러올 때 설 수 없는 자리(깊은 물·지도 밖)면 가까운 뭍으로 옮긴다.
 //   이벤트 'save:done' {slot, auto}, 'save:beforeLoad' {slot}, 'save:load' {slot}
 
+import { canStand } from '../engine/physics.js';
 import { clamp } from '../engine/util.js';
 
 export const SAVE_VERSION = 1;
@@ -265,28 +266,32 @@ class SaveSystem {
       x = clamp(x, 1, Math.max(1, size.w - 1));
       y = clamp(y, 1, Math.max(1, size.h - 1));
     }
+    const r = this.game.player?.radius || 0.35;
     const ok = (px, py) => {
       try {
         if (w.isDeepWater?.(px, py)) return false;
-        return w.passable?.(px, py, 'foot') !== false;
+        // 지형뿐 아니라 건물·성벽 사각형도 본다 (지도가 바뀌어 저장 자리에 집이 들어섰으면 갇히지 않게)
+        if (typeof w.passable === 'function') return canStand(w, px, py, r, 'foot');
+        return true;
       } catch {
         return true;
       }
     };
     if (ok(x, y)) return { x, y };
-    try {
-      const q = w.randomPassableNear?.(x, y, 60, 'foot');
-      if (q && Number.isFinite(q.x) && Number.isFinite(q.y) && ok(q.x, q.y)) return { x: q.x, y: q.y };
-    } catch {
-      /* 없음 */
-    }
-    for (let r = 4; r <= 200; r += 4) {
-      const n = Math.max(8, Math.round(r * 0.8));
+    // 가까운 고리부터 훑는다 (randomPassableNear 는 반경 안 아무 데나 주므로 가장 가까운 자리가 아니다)
+    for (let r = 1.5; r <= 200; r += r < 20 ? 1.5 : 4) {
+      const n = Math.max(8, Math.round(r * 1.2));
       for (let i = 0; i < n; i++) {
         const a = (i / n) * Math.PI * 2;
         const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
         if (ok(px, py)) return { x: px, y: py };
       }
+    }
+    try {
+      const q = w.randomPassableNear?.(x, y, 60, 'foot');
+      if (q && Number.isFinite(q.x) && Number.isFinite(q.y) && ok(q.x, q.y)) return { x: q.x, y: q.y };
+    } catch {
+      /* 없음 */
     }
     const sp = w.spawn;
     return sp && Number.isFinite(sp.x) && Number.isFinite(sp.y) ? { x: sp.x, y: sp.y } : { x, y };

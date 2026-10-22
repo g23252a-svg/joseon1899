@@ -1,7 +1,7 @@
 // 물건 화면: 소지품(분류별 격자 + 설명·사용), 제작(조리법·재료), 상점(사기·팔기).
 // 다른 시스템이 없거나 아직 덜 만들어져도 깨지지 않게 모든 호출은 safe/옵셔널 체이닝.
 
-import { emptyNote, h, josa, safe, setAttr, setClass, setText } from './dom.js';
+import { emptyNote, h, josa, keepFocus, safe, setAttr, setClass, setText } from './dom.js';
 import { itemIcon } from './icons.js';
 
 // ---------------------------------------------------------------- 아이템 정의
@@ -75,7 +75,9 @@ export function createInventoryView(c) {
   ensureItemDefs(() => c.queueRefresh());
   const list = h('div', { class: 'jx-inv-list' });
   const detail = h('aside', { class: 'jx-detail', 'aria-live': 'polite' });
-  const el = h('div', { class: 'jx-inv' }, list, detail);
+  // 좁은 화면에서는 패널 머리의 돈 표시가 숨으므로 목록 위에 따로 보여 준다 (styles.js .jx-wallet)
+  const wallet = h('div', { class: 'jx-wallet', 'aria-hidden': 'true' });
+  const el = h('div', { class: 'jx-inv' }, h('div', { class: 'jx-inv-main' }, wallet, list), detail);
   let sel = null;
   let cells = new Map();
   let items = [];
@@ -112,6 +114,7 @@ export function createInventoryView(c) {
         h('button', {
           class: 'jx-btn jx-primary',
           type: 'button',
+          'data-fk': 'use',
           text: def.cat === 'consumable' || def.cat === 'herb' || def.cat === 'meat' ? '먹기 · 쓰기' : '쓰기',
           onclick: () => {
             const ok = safe(() => inv.use(e.id), false);
@@ -128,6 +131,7 @@ export function createInventoryView(c) {
         h('button', {
           class: 'jx-btn',
           type: 'button',
+          'data-fk': 'equip',
           text: eq ? '손에 들고 있음' : '손에 들기',
           disabled: eq,
           onclick: () => {
@@ -141,10 +145,14 @@ export function createInventoryView(c) {
     if (acts.childElementCount !== 0) detail.append(acts);
   }
 
-  function refresh() {
+  // 다 쓴 물건이 사라지면 고른 칸(없으면 첫 칸)으로 포커스를 돌린다
+  const refresh = () => keepFocus(el, render, '.jx-cell[aria-pressed="true"]');
+
+  function render() {
     list.textContent = '';
     cells = new Map();
     const inv = game.sys.inventory;
+    setText(wallet, typeof inv?.money === 'number' ? `가진 돈 ${c.money(inv.money)}` : '');
     items = inv?.list ? invList(game) : [];
     setClass(el, 'jx-solo', !items.length);
     if (!inv?.list) {
@@ -180,6 +188,7 @@ export function createInventoryView(c) {
             class: 'jx-cell',
             type: 'button',
             role: 'listitem',
+            'data-fk': `c:${e.id}`,
             'aria-pressed': 'false',
             'aria-label': `${def.name || e.id} ${e.n ?? 1}개`,
             title: def.name || e.id,
@@ -236,8 +245,9 @@ export function createCraftView(c) {
   const { game } = c;
   ensureItemDefs(() => c.queueRefresh());
   const el = h('div');
+  const refresh = () => keepFocus(el, render);
 
-  function refresh() {
+  function render() {
     el.textContent = '';
     const cr = game.sys.crafting;
     if (!cr?.recipes) {
@@ -288,6 +298,7 @@ export function createCraftView(c) {
             class: 'jx-btn jx-primary',
             type: 'button',
             text: '만들기',
+            'data-fk': `mk:${r.id}`,
             disabled: !can,
             'aria-label': `${r.name || outDef.name || outId} 만들기`,
             onclick: () => {
@@ -324,7 +335,8 @@ export function createShopView(c) {
   const minus = h('button', { class: 'jx-btn', type: 'button', text: '−', 'aria-label': '하나 덜', onclick: () => setQty(qty - 1) });
   const plus = h('button', { class: 'jx-btn', type: 'button', text: '+', 'aria-label': '하나 더', onclick: () => setQty(qty + 1) });
   const go = h('button', { class: 'jx-btn jx-primary', type: 'button', text: '사기', onclick: () => doTrade() });
-  const trade = h('div', { class: 'jx-trade' }, tradeName, h('div', { class: 'jx-qty' }, minus, qtyOut, plus), total, go);
+  const wallet = h('div', { class: 'jx-wallet' });
+  const trade = h('div', { class: 'jx-trade' }, tradeName, h('div', { class: 'jx-qty' }, minus, qtyOut, plus), total, go, wallet);
   const el = h('div', { class: 'jx-shop' }, buyCol, sellCol, trade);
 
   let shopId = null;
@@ -376,8 +388,9 @@ export function createShopView(c) {
     const b = h(
       'button',
       {
-        class: 'jx-srow',
+        class: `jx-srow${left != null && left < 1 ? ' jx-soldout' : ''}`,
         type: 'button',
+        'data-fk': `${mode}:${id}`,
         'aria-pressed': sel && sel.mode === mode && sel.id === id ? 'true' : 'false',
         onclick: () => {
           sel = { mode, id, price, max, left };
@@ -394,12 +407,16 @@ export function createShopView(c) {
     return b;
   }
 
-  function refresh() {
+  const refresh = () => keepFocus(el, render, '.jx-srow[aria-pressed="true"]');
+
+  function render() {
     const sh = game.sys.shops;
     buyCol.textContent = '';
     sellCol.textContent = '';
     rowBtns = [];
     c.setTitle(shopName(sh, shopId), '商');
+    const m = game.sys.inventory?.money;
+    setText(wallet, typeof m === 'number' ? `가진 돈 ${c.money(m)}` : '');
     if (!sh) {
       buyCol.append(emptyNote('商', '가게 문이 닫혀 있습니다', '상점 기능이 준비되지 않았습니다.'));
       sel = null;
@@ -420,7 +437,8 @@ export function createShopView(c) {
         sel = { mode: 'buy', id: s.itemId, price, max, left };
         stillSel = true;
       }
-      buyCol.append(row('buy', s.itemId, price, typeof s.n === 'number' && isFinite(s.n) ? `${s.n}개 남음` : '', max, null, left));
+      const sub = typeof s.n === 'number' && isFinite(s.n) ? (s.n < 1 ? '다 팔림' : `${s.n}개 남음`) : '';
+      buyCol.append(row('buy', s.itemId, price, sub, max, null, left));
     }
     sellCol.append(h('h3', { class: 'jx-sec-h' }, h('span', { text: '팔기' }), h('small', { text: '賣' })));
     let nSell = 0;

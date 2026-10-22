@@ -7,6 +7,8 @@ import { mulberry32, mixHex, rgba, clamp, pointInPolygon } from '../engine/util.
 
 export const SOLID_BLOCKS = ['foot', 'swim', 'horse', 'wheel', 'boat']; // rail·ghost 는 통과 (노선 차량이 끼지 않게)
 const TAU = Math.PI * 2;
+// 빛은 북서에서 온다: 빛 쪽을 가리키는 단위 벡터 (지붕·수관 음영)
+export const LIGHT_X = -0.6, LIGHT_Y = -0.8;
 
 // ---------------------------------------------------------------- 공용
 
@@ -555,7 +557,7 @@ export class Structures {
     const tr = this.tr, M = this.map, forests = M.forests || [];
     const rng = mulberry32(4242);
     const list = [];
-    const push = (x, y, r, kind) => list.push(x, y, r, kind, (rng() * 1e9) | 0);
+    const push = (x, y, r, kind) => list.push(x, y, r, kind, (rng() * 16777215) | 0); // 씨앗은 Float32 에 정확히 들어가는 24비트
     const S = 4.6;
     const C = tr.cols;
     for (let gy = 0; gy * S < tr.h; gy++)
@@ -862,7 +864,7 @@ function hipRoof(ctx, p, st, b) {
   ctx.restore();
 }
 
-/** 초가: 둥근 볏짚 지붕 + 새끼줄 */
+/** 초가: 볏짚 결(용마루에서 처마로 흘러내리는 곡선 붓질 여러 겹) + 새끼줄 그물 + 용마름 + 들쭉날쭉한 처마 끝 */
 function thatchRoof(ctx, p, b) {
   ctx.save();
   ctx.translate(p.x, p.y);
@@ -870,85 +872,218 @@ function thatchRoof(ctx, p, b) {
   if (!long) ctx.rotate(Math.PI / 2);
   const W = long ? p.w : p.h, H = long ? p.h : p.w;
   const hw = W / 2, hh = H / 2;
+  const hut = b.roof === 'hut';
+  // 빛(북서)을 이 지붕의 로컬 좌표로
+  const th = (b.angle || 0) + (long ? 0 : Math.PI / 2);
+  const ca = Math.cos(th), sa = Math.sin(th);
+  const Lx = LIGHT_X * ca + LIGHT_Y * sa, Ly = -LIGHT_X * sa + LIGHT_Y * ca;
   const age = rnd();
-  const base = mixHex(PAL.roofThatch, '#9c9585', age * 0.45);
-  const edge = mixHex(PAL.roofThatchEdge, '#6f6a5c', age * 0.4);
-  // 둥근 외곽 (흔들림)
-  const outline = (sc = 1) => {
+  const base = mixHex(PAL.roofThatch, '#a49b86', age * 0.5); // 묵은 지붕은 잿빛
+  const dark = mixHex(PAL.roofThatchEdge, '#5d584a', age * 0.45);
+  const light = mixHex(PAL.roofThatch, '#f2e6c4', 0.55 - age * 0.25);
+  const E = hut ? 2.3 : 2.7; // 초타원 지수 (클수록 네모)
+  const k = Math.min(hw, hh * 0.95);
+  const rL = -hw + k, rR = hw - k; // 용마루 양 끝
+  const sePt = (cx, cy) => [Math.sign(cx) * Math.pow(Math.abs(cx), 2 / E), Math.sign(cy) * Math.pow(Math.abs(cy), 2 / E)];
+  // 처마 외곽점 (볏짚 끝이라 들쭉날쭉, 크게는 조금 출렁)
+  const N = Math.max(48, Math.round(((W + H) * 2.6) / 0.2));
+  const OX = new Float32Array(N), OY = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * TAU;
+    const [sx, sy] = sePt(Math.cos(a), Math.sin(a));
+    const j = 1 + (rnd() - 0.5) * 0.04 + Math.sin(a * 5 + (b.seed % 97)) * 0.012;
+    OX[i] = sx * hw * j;
+    OY[i] = sy * hh * j;
+  }
+  const outline = (sc = 1, ox = 0, oy = 0) => {
     ctx.beginPath();
-    const n = 28;
-    for (let i = 0; i <= n; i++) {
-      const a = (i / n) * TAU;
-      const cx = Math.cos(a), cy = Math.sin(a);
-      // 둥근 사각형 근사(superellipse)
-      const e = 3.2;
-      const sx = Math.sign(cx) * Math.pow(Math.abs(cx), 2 / e), sy = Math.sign(cy) * Math.pow(Math.abs(cy), 2 / e);
-      const wob = 1 + (Math.sin(a * 5 + b.seed) * 0.012 + Math.sin(a * 11 + b.seed * 0.3) * 0.01);
-      const x = sx * hw * sc * wob, y = sy * hh * sc * wob;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    for (let i = 0; i < N; i++) {
+      const x = OX[i] * sc + ox, y = OY[i] * sc + oy;
+      if (i) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
     }
     ctx.closePath();
   };
-  outline(1.02);
-  ctx.fillStyle = edge;
+  // 1) 처마 두께(그늘 쪽으로 밀린 어두운 테) + 몸
+  outline(1.03, -Lx * 0.14, -Ly * 0.14);
+  ctx.fillStyle = rgba(dark, 0.92);
   ctx.fill();
-  outline(0.96);
-  const grd = ctx.createLinearGradient(0, -hh, 0, hh);
-  grd.addColorStop(0, mixHex(base, '#efe2bd', 0.25));
-  grd.addColorStop(0.5, base);
-  grd.addColorStop(1, mixHex(base, edge, 0.55));
-  ctx.fillStyle = grd;
+  outline(1);
+  ctx.fillStyle = base;
   ctx.fill();
-  // 볏짚 결
   ctx.save();
-  outline(0.96);
+  outline(1);
   ctx.clip();
-  ctx.lineWidth = 0.05;
-  ctx.strokeStyle = rgba(edge, 0.45);
+  // 2) 경사 음영: 용마루를 사이에 두고 빛 쪽 면은 밝게, 반대쪽은 어둡게 (부드러운 꺾임)
+  const tone = (lit, s) => (lit >= 0 ? rgba(light, Math.min(0.55, lit * 0.5 * s)) : rgba(dark, Math.min(0.6, -lit * 0.55 * s)));
+  const gy = ctx.createLinearGradient(0, -hh, 0, hh);
+  gy.addColorStop(0, tone(-Ly, 1));
+  gy.addColorStop(0.4, tone(-Ly, 0.55));
+  gy.addColorStop(0.5, tone(0.3, 0.5));
+  gy.addColorStop(0.6, tone(Ly, 0.55));
+  gy.addColorStop(1, tone(Ly, 1));
+  ctx.fillStyle = gy;
+  ctx.fillRect(-hw - 1, -hh - 1, W + 2, H + 2);
+  if (k > 0.4) {
+    const f = Math.min(0.45, (k * 0.9) / W);
+    const gx = ctx.createLinearGradient(-hw, 0, hw, 0);
+    gx.addColorStop(0, tone(-Lx, 1));
+    gx.addColorStop(f, tone(-Lx, 0));
+    gx.addColorStop(1 - f, tone(Lx, 0));
+    gx.addColorStop(1, tone(Lx, 1));
+    ctx.fillStyle = gx;
+    ctx.fillRect(-hw - 1, -hh - 1, W + 2, H + 2);
+  }
+  // 묵은 지붕: 잿빛·이끼 얼룩
+  if (age > 0.45) {
+    ctx.fillStyle = rgba(mixHex(PAL.treeDark, dark, 0.5), 0.1 + (age - 0.45) * 0.2);
+    ctx.beginPath();
+    for (let q = 0; q < 3; q++) {
+      const x = (rnd() - 0.5) * W * 0.8, y = (rnd() - 0.5) * H * 0.8, r = 0.5 + rnd() * 0.9;
+      ctx.moveTo(x + r, y);
+      ctx.ellipse(x, y, r, r * 0.7, rnd() * 3, 0, TAU);
+    }
+    ctx.fill();
+  }
+  // 3) 볏짚 결: 용마루에서 처마로 흘러내리는 짧은 곡선 붓질. 빛 받는 정도·묵은 정도로 네 빛깔
+  const S = hut ? 0.36 : 0.3;
+  const BK = [[], [], [], []];
+  const fOf = (x, y) => Math.pow(Math.pow(Math.abs(x / hw), E) + Math.pow(Math.abs(y / hh), E), 1 / E);
+  const straw = (x, y, sc, out) => {
+    const f = fOf(x, y);
+    if (f > 0.985) return;
+    const rx = x < rL ? rL : x > rR ? rR : x;
+    let dx = x - rx, dy = y;
+    const d = Math.hypot(dx, dy);
+    if (d < 0.14) return; // 용마름 밑
+    dx /= d;
+    dy /= d;
+    const lit = dx * Lx + dy * Ly;
+    const len = (0.3 + rnd() * 0.3 + f * 0.16) * sc;
+    const bend = (rnd() - 0.5) * 0.16;
+    const v = lit * 0.9 + (rnd() - 0.5) * 0.9 - f * 0.4;
+    const bi = out ? 3 - (v < -0.2 ? 1 : 0) : v > 0.35 ? 3 : v > -0.05 ? 2 : v > -0.45 ? 1 : 0;
+    BK[bi].push(x - dx * len * 0.35, y - dy * len * 0.35, x - dy * bend, y + dx * bend, x + dx * len * 0.65, y + dy * len * 0.65);
+  };
+  const strokeBK = (cols) => {
+    ctx.lineCap = 'round';
+    for (let bi = 0; bi < 4; bi++) {
+      const L = BK[bi];
+      if (!L.length) continue;
+      ctx.strokeStyle = rgba(cols[bi][0], cols[bi][1]);
+      ctx.lineWidth = cols[bi][2];
+      ctx.beginPath();
+      for (let q = 0; q < L.length; q += 6) {
+        ctx.moveTo(L[q], L[q + 1]);
+        ctx.quadraticCurveTo(L[q + 2], L[q + 3], L[q + 4], L[q + 5]);
+      }
+      ctx.stroke();
+      L.length = 0;
+    }
+  };
+  for (let yy = -hh; yy < hh; yy += S) for (let xx = -hw; xx < hw; xx += S) straw(xx + rnd() * S, yy + rnd() * S, 1, false);
+  strokeBK([
+    [dark, 0.5, 0.065],
+    [mixHex(base, dark, 0.5), 0.55, 0.055],
+    [mixHex(base, light, 0.35), 0.55, 0.05],
+    [light, 0.62, 0.045],
+  ]);
+  // 4) 새끼줄 그물: 용마루에서 앞뒤 처마로 내리는 줄 + 처마와 나란히 도는 줄 (꼬인 줄이라 점선, 옅게)
+  ctx.setLineDash([0.12, 0.07]);
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = rgba(mixHex(PAL.timber, dark, 0.45), 0.4);
+  ctx.lineWidth = 0.055;
   ctx.beginPath();
-  for (let i = 0; i < W * H * 1.1; i++) {
-    const x = (rnd() - 0.5) * W, y = (rnd() - 0.5) * H;
-    const l = 0.35 + rnd() * 0.4;
-    const dir = y < 0 ? -1 : 1;
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + (rnd() - 0.5) * 0.12, y + dir * l);
+  const M = Math.max(4, Math.round(0.85 / ((2 * (W + H) * 0.93) / N)));
+  for (let i = (b.seed >>> 3) % M; i < N; i += M) {
+    const ex = OX[i] * 0.97, ey = OY[i] * 0.97;
+    const rx = ex < rL ? rL : ex > rR ? rR : ex;
+    const sway = (rnd() - 0.5) * 0.25;
+    ctx.moveTo(rx, 0);
+    ctx.quadraticCurveTo((rx + ex) / 2 + sway, ey / 2, ex, ey);
+  }
+  for (const sc of hut ? [0.6] : [0.8, 0.55]) {
+    const n2 = 40;
+    for (let i = 0; i <= n2; i++) {
+      const a = (i / n2) * TAU;
+      const [sx, sy] = sePt(Math.cos(a), Math.sin(a));
+      const x = sx * (hw - (1 - sc) * hh), y = sy * hh * sc;
+      if (i) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
+    }
   }
   ctx.stroke();
-  // 새끼줄 그물
-  ctx.strokeStyle = rgba(PAL.timber, 0.5);
-  ctx.lineWidth = 0.06;
-  ctx.beginPath();
-  for (let y = -hh + 0.7; y < hh - 0.3; y += 0.8) {
-    ctx.moveTo(-hw, y);
-    ctx.quadraticCurveTo(0, y + (y / hh) * 0.35, hw, y);
-  }
-  for (let x = -hw + 0.6; x < hw; x += 1.0) {
-    ctx.moveTo(x, -hh);
-    ctx.quadraticCurveTo(x + (x / hw) * 0.3, 0, x, hh);
-  }
-  ctx.stroke();
-  ctx.restore();
-  // 용마름 (꼭대기 이엉)
+  ctx.setLineDash([]);
+  // 5) 성긴 볏짚 붓질을 한 겹 더 (줄을 군데군데 덮어 그물이 바구니처럼 보이지 않게)
+  for (let yy = -hh; yy < hh; yy += S * 2.1) for (let xx = -hw; xx < hw; xx += S * 2.1) straw(xx + rnd() * S * 2, yy + rnd() * S * 2, 1.1, true);
+  strokeBK([
+    [dark, 0.5, 0.06],
+    [mixHex(base, dark, 0.5), 0.5, 0.055],
+    [mixHex(base, light, 0.4), 0.55, 0.05],
+    [mixHex(base, light, 0.6), 0.6, 0.05],
+  ]);
+  ctx.restore(); // 클립
+  // 6) 처마 끝 술: 바깥으로 삐져나온 볏짚 끝 (그늘 쪽은 짙게)
   ctx.lineCap = 'round';
-  ctx.strokeStyle = rgba(mixHex(edge, PAL.ink, 0.25), 0.9);
-  ctx.lineWidth = 0.42;
-  ctx.beginPath();
-  ctx.moveTo(-hw + hh * 0.75, 0);
-  ctx.lineTo(hw - hh * 0.75, 0);
-  ctx.stroke();
-  ctx.strokeStyle = rgba(base, 0.9);
-  ctx.lineWidth = 0.06;
-  ctx.beginPath();
-  for (let x = -hw + hh * 0.75; x < hw - hh * 0.75; x += 0.3) {
-    ctx.moveTo(x, -0.18);
-    ctx.lineTo(x + 0.15, 0.18);
+  for (const [col, al, lw, shadeSide] of [[dark, 0.6, 0.045, true], [mixHex(base, dark, 0.3), 0.55, 0.04, false]]) {
+    ctx.strokeStyle = rgba(col, al);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    for (let i = shadeSide ? 0 : 1; i < N; i += 2) {
+      const x = OX[i], y = OY[i];
+      const r = Math.hypot(x, y) || 1, ux = x / r, uy = y / r;
+      if ((ux * Lx + uy * Ly < 0) !== shadeSide && rnd() < 0.6) continue;
+      const o = 0.06 + rnd() * 0.12, s = (rnd() - 0.5) * 0.1;
+      ctx.moveTo(x - ux * 0.16, y - uy * 0.16);
+      ctx.lineTo(x + ux * o - uy * s, y + uy * o + ux * s);
+    }
+    ctx.stroke();
   }
+  // 7) 용마름: 엮어 얹은 꼭대기 이엉 (그늘 + 굵은 띠 + ㅅ자 결 + 가는 먹선)
+  const rl = rL - (hut ? 0.12 : 0.3), rr = rR + (hut ? 0.12 : 0.3);
+  if (rr - rl > 0.35) {
+    const RW = hut ? 0.34 : 0.5;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = rgba(dark, 0.45);
+    ctx.lineWidth = RW * 1.1;
+    ctx.beginPath();
+    ctx.moveTo(rl - Lx * 0.14, -Ly * 0.14);
+    ctx.lineTo(rr - Lx * 0.14, -Ly * 0.14);
+    ctx.stroke();
+    ctx.strokeStyle = rgba(mixHex(base, dark, 0.3), 0.97);
+    ctx.lineWidth = RW;
+    ctx.beginPath();
+    ctx.moveTo(rl, 0);
+    ctx.lineTo(rr, 0);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+    ctx.strokeStyle = rgba(light, 0.75);
+    ctx.lineWidth = 0.05;
+    ctx.beginPath();
+    for (let x = rl - RW * 0.2; x < rr + RW * 0.1; x += 0.19) {
+      ctx.moveTo(x, -RW * 0.42);
+      ctx.lineTo(x + 0.13, 0);
+      ctx.lineTo(x, RW * 0.42);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = rgba(PAL.ink, 0.42);
+    ctx.lineWidth = 0.035;
+    ctx.beginPath();
+    for (const sd of [-1, 1]) {
+      ctx.moveTo(rl, (sd * RW) / 2);
+      ctx.lineTo(rr, (sd * RW) / 2);
+    }
+    ctx.stroke();
+  }
+  // 8) 외곽 먹선: 들쭉날쭉한 처마선을 가늘게 + 그늘 쪽 겹선
+  ctx.lineJoin = 'round';
+  outline(1.005, -Lx * 0.07, -Ly * 0.07);
+  ctx.strokeStyle = rgba(PAL.ink, 0.3);
+  ctx.lineWidth = 0.1;
   ctx.stroke();
-  // 외곽 먹선
-  outline(1.02);
-  ctx.strokeStyle = rgba(PAL.ink, 0.7);
-  ctx.lineWidth = 0.07;
+  outline(1);
+  ctx.strokeStyle = rgba(PAL.ink, 0.6);
+  ctx.lineWidth = 0.045;
   ctx.stroke();
   ctx.restore();
 }
@@ -1083,6 +1218,7 @@ export class RoofRenderer {
     this.budgetPx = 8e6;
     this.perFrame = 8;
     this._vis = [];
+    this._pre = [];
   }
   /** 지붕 캐시: 건물 각도까지 돌려서 그려 둔다 (그릴 때 회전·save/restore 가 필요 없다) */
   _entry(b, tier) {
@@ -1111,14 +1247,45 @@ export class RoofRenderer {
     drawRoof(ctx, b);
     return { tier, scale: t, canvas: cv, px: Math.ceil(w) * Math.ceil(h), rx0, ry0, rw: rx1 - rx0, rh: ry1 - ry0 };
   }
-  draw(ctx, game, view, workLeft = null) {
-    const st = this.st, cam = game.camera;
+  /** 화면 배율(기기 px/m)에 맞는 지붕 캐시 해상도 */
+  tierFor(game) {
+    const cam = game.camera;
     const zpx = (cam.zoom || 14) * (cam.dpr || 1);
-    let tier = ROOF_TIERS[ROOF_TIERS.length - 1];
-    for (const t of ROOF_TIERS) if (t >= zpx * 0.9) {
-      tier = t;
-      break;
+    for (const t of ROOF_TIERS) if (t >= zpx * 0.9) return t;
+    return ROOF_TIERS[ROOF_TIERS.length - 1];
+  }
+  /** 지붕 캐시 하나 만들어 넣기 → 항목(실패면 기존 것) */
+  _put(b, tier) {
+    const old = this.cache.get(b.id);
+    const ne = this._entry(b, tier);
+    if (!ne) return old || null;
+    if (old) this.px -= old.px;
+    this.cache.delete(b.id);
+    this.cache.set(b.id, ne);
+    this.px += ne.px;
+    return ne;
+  }
+  /** rect 안 건물 지붕을 가까운 것부터 미리 만든다 (workLeft() > 0 인 동안, 최대 maxN 채) */
+  prebuild(game, rect, workLeft, maxN = 4) {
+    const tier = this.tierFor(game);
+    const list = this.st.queryBuildings(rect.x0 - 2, rect.y0 - 2, rect.x1 + 2, rect.y1 + 2, (this._pre.length = 0, this._pre));
+    const cx = (rect.x0 + rect.x1) / 2, cy = (rect.y0 + rect.y1) / 2;
+    let need = 0;
+    for (const b of list) if (this.cache.get(b.id)?.tier !== tier) list[need++] = b;
+    list.length = need;
+    if (!need) return 0;
+    list.sort((a, b) => (a.x - cx) ** 2 + (a.y - cy) ** 2 - ((b.x - cx) ** 2 + (b.y - cy) ** 2));
+    let n = 0;
+    for (const b of list) {
+      if (n >= maxN || workLeft() <= 0) break;
+      this._put(b, tier);
+      n++;
     }
+    return n;
+  }
+  draw(ctx, game, view, workLeft = null) {
+    const st = this.st;
+    const tier = this.tierFor(game);
     const vis = st.queryBuildings(view.x0 - 2, view.y0 - 2, view.x1 + 2, view.y1 + 2, (this._vis.length = 0, this._vis));
     vis.sort((a, b) => a.y - b.y);
     const pl = game.player, tgt = pl?.vehicle || pl;
@@ -1132,16 +1299,10 @@ export class RoofRenderer {
     for (const b of vis) {
       let e = this.cache.get(b.id);
       if (!e || e.tier !== tier) {
-        if (made < this.perFrame && (made === 0 || (workLeft ? workLeft() > 0 : now() - t0 < 2.5))) {
-          const ne = this._entry(b, tier);
+        // 다른 해상도 캐시가 있으면 그것으로 버티고, 없으면 적어도 하나는 만든다
+        if (made < this.perFrame && ((made === 0 && !e) || (workLeft ? workLeft() > 0 : now() - t0 < 2.5))) {
+          e = this._put(b, tier);
           made++;
-          if (ne) {
-            if (e) this.px -= e.px;
-            e = ne;
-            this.cache.delete(b.id);
-            this.cache.set(b.id, e);
-            this.px += e.px;
-          }
         }
       } else {
         // LRU: 최근 사용을 뒤로
@@ -1176,11 +1337,23 @@ export class RoofRenderer {
 
 // ---------------------------------------------------------------- 땅에 붙는 것 (청크 렌더러가 부름)
 
+/** 둥근 모서리 사각형 경로 (지금 변환 기준) */
+function rrPath(ctx, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+const isThatch = (b) => b.roof === 'thatch' || b.roof === 'hut';
+
 /** 건물 그림자와 기단·바닥 (지붕이 반투명일 때 보인다) */
 export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
   const list = st.queryBuildings(x0 - 4, y0 - 4, x1 + 4, y1 + 4, []);
   if (!list.length) return;
-  // 그림자: 남동쪽으로 번지게 두 겹
+  // 그림자: 남동쪽으로 번지게 두 겹 (초가는 지붕처럼 둥글게)
   for (const [off, grow, a] of [[1.6, 0.9, 0.09], [0.9, 0.25, 0.14]]) {
     ctx.fillStyle = `rgba(40,36,30,${a})`;
     ctx.beginPath();
@@ -1189,6 +1362,14 @@ export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
       for (const p of b.parts) {
         const hw = p.w / 2 + grow * 0.5, hh = p.h / 2 + grow * 0.5;
         const cx = b.x + p.x * c - p.y * s + off * 0.8, cy = b.y + p.x * s + p.y * c + off;
+        if (isThatch(b)) {
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(b.angle);
+          rrPath(ctx, -hw, -hh, hw * 2, hh * 2, Math.min(hw, hh) * 0.75);
+          ctx.restore();
+          continue;
+        }
         ctx.moveTo(cx + (-hw) * c - (-hh) * s, cy + (-hw) * s + (-hh) * c);
         ctx.lineTo(cx + hw * c - (-hh) * s, cy + hw * s + (-hh) * c);
         ctx.lineTo(cx + hw * c - hh * s, cy + hw * s + hh * c);
@@ -1204,6 +1385,38 @@ export function drawBuildingGround(ctx, st, x0, y0, x1, y1) {
     ctx.translate(b.x, b.y);
     ctx.rotate(b.angle);
     const western = b.roof === 'western';
+    if (isThatch(b)) {
+      // 초가: 낮은 흙 기단 + 둥근 처마 밖으로 모서리가 비어져 나오지 않게 안으로 들이고 모를 죽인다
+      for (const p of b.parts) {
+        const ins = b.eave + 0.25, hw = p.w / 2 - ins, hh = p.h / 2 - ins;
+        if (hw <= 0 || hh <= 0) continue;
+        ctx.beginPath();
+        rrPath(ctx, p.x - hw - 0.15, p.y - hh - 0.15, hw * 2 + 0.3, hh * 2 + 0.3, 1);
+        ctx.fillStyle = mixHex(PAL.wallStone, PAL.mud, 0.4);
+        ctx.fill();
+        ctx.beginPath();
+        rrPath(ctx, p.x - hw, p.y - hh, hw * 2, hh * 2, 0.85);
+        ctx.fillStyle = mixHex(PAL.timber, PAL.paper, 0.6);
+        ctx.fill();
+        ctx.strokeStyle = rgba(PAL.ink, 0.55);
+        ctx.lineWidth = 0.07;
+        ctx.stroke();
+        ctx.strokeStyle = rgba(PAL.timber, 0.3);
+        ctx.lineWidth = 0.04;
+        ctx.beginPath();
+        for (let x = p.x - hw + 0.6; x < p.x + hw - 0.3; x += 0.5) {
+          ctx.moveTo(x, p.y - hh + 0.3);
+          ctx.lineTo(x, p.y + hh - 0.3);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+      if (b.door) {
+        ctx.fillStyle = rgba(PAL.wallStone, 0.95);
+        ctx.fillRect(b.door.x - 0.45, b.door.y - 0.3, 0.9, 0.6);
+      }
+      continue;
+    }
     for (const p of b.parts) {
       const hw = p.w / 2 - b.eave, hh = p.h / 2 - b.eave;
       if (hw <= 0 || hh <= 0) continue;
@@ -1268,11 +1481,48 @@ export function drawTreeShadows(ctx, st, ci, cj, x0, y0, x1, y1) {
   ctx.fill();
 }
 
-/** 나무 윗부분(수관) — 캔오피 청크에 일괄로 그린다. 번지는 물감 덩이 + 점엽(먹 점) + 솔잎 */
-/** 수관 그리기 단계 수 (청크 하나를 여러 프레임에 나눠 그린다) */
-export const CANOPY_STAGES = 5;
+/**
+ * 나무 윗부분(수관) — 수관 청크에 일괄로 그린다. 여러 프레임에 나눠 단계(stage)별로.
+ *  활엽: 잎 무리(엽군) 여러 개의 옅은 물감 → 짧은 붓 점(미점) 세 농담 → 그늘 쪽 먹 점·끊긴 먹선
+ *  소나무: 가지 먹선 → 납작한 잎판 물감 → 바늘 묶음(부채꼴 솔잎) 두 농담
+ *  버들: 물감 → 늘어진 실 붓선.  감나무: 붉은 열매
+ * detail: 1 = 가까이(20px/m), 0.45 = 보통(8px/m) — 붓 점·솔잎 수를 줄이고 번짐 한 겹을 뺀다
+ */
+export const CANOPY_STAGES = 7;
 
-export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1, stage = -1) {
+// 엽군(잎 무리) 배치: 나무마다 같은 씨앗으로 늘 같은 모양 → out = [cx, cy, rc, lit] * n
+function leafClusters(tt, n, out) {
+  const x = tt[n], y = tt[n + 1], r = tt[n + 2], kind = tt[n + 3];
+  srand(tt[n + 4] + 101);
+  out.length = 0;
+  if (kind === 0) {
+    // 소나무: 큰 가지 두셋 방향으로 몰린, 크기가 제각각인 솔잎 바퀴(차륜) 여러 개 — 대칭이 되지 않게
+    const nb = 2 + (rnd() < 0.5 ? 1 : 0), a0 = rnd() * TAU;
+    const cnt = Math.max(4, Math.round(r * r * 0.75));
+    for (let i = 0; i < cnt; i++) {
+      const br = a0 + ((i % nb) / nb) * TAU + (rnd() - 0.5) * 0.4;
+      const a = br + (rnd() - 0.5) * 1.5;
+      const d = r * (i === 0 ? 0.1 : 0.22 + Math.sqrt(rnd()) * 0.46);
+      const rc = r * (0.25 + rnd() * 0.14) * (i === 0 ? 1.2 : 1);
+      const ux = Math.cos(a), uy = Math.sin(a);
+      out.push(x + ux * d, y + uy * d, rc, ux * LIGHT_X + uy * LIGHT_Y + (rnd() - 0.5) * 0.6);
+    }
+    return out;
+  }
+  const cnt = kind === 3 ? 8 : kind === 2 ? 5 : 6;
+  const a0 = rnd() * TAU;
+  out.push(x + (rnd() - 0.5) * r * 0.15, y + (rnd() - 0.5) * r * 0.15, r * (0.42 + rnd() * 0.1), 0);
+  for (let i = 0; i < cnt; i++) {
+    const a = a0 + (i / cnt) * TAU + (rnd() - 0.5) * 0.8;
+    const d = r * (0.34 + rnd() * 0.2);
+    const rc = r * (0.3 + rnd() * 0.15);
+    const ux = Math.cos(a), uy = Math.sin(a);
+    out.push(x + ux * d, y + uy * d * 0.94, rc, ux * LIGHT_X + uy * LIGHT_Y);
+  }
+  return out;
+}
+
+export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1, stage = -1, detail = 1) {
   const list = st.treesInChunk(ci, cj);
   if (!list || !list.length) return 0;
   const tt = st.trees;
@@ -1285,180 +1535,229 @@ export function drawCanopy(ctx, st, ci, cj, x0, y0, x1, y1, stage = -1) {
   }
   if (!idx.length) return 0;
   idx.sort((a, b) => tt[a + 1] - tt[b + 1]);
-  // 수관 덩이 모양 (물감 번짐): 잎 무리 몇 개
-  const lobes = (n, sc, seedOff) => {
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2], kind = tt[n + 3];
-    srand(tt[n + 4] + seedOff);
-    const cnt = kind === 3 ? 7 : kind === 0 ? 5 : kind === 2 ? 6 : 5;
-    for (let b = 0; b < cnt; b++) {
-      const a = rnd() * TAU, d = r * (0.12 + rnd() * 0.36), rr = r * sc * (0.38 + rnd() * 0.22) * (kind === 0 ? 0.92 : 1);
-      const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
-      ctx.moveTo(bx + rr, by);
-      ctx.arc(bx, by, rr, 0, TAU);
-    }
-  };
-  const fillLobes = (filter, color, alpha, sc, seedOff = 0) => {
+  const all = stage < 0;
+  const CL = [];
+  const isPine = (n) => tt[n + 3] === 0;
+  const isBroad = (n) => tt[n + 3] !== 0 && tt[n + 3] !== 2;
+  const isWillow = (n) => tt[n + 3] === 2;
+  const BROAD = mixHex(PAL.forest, PAL.treeDark, 0.3);
+  const BROAD_L = mixHex(PAL.treeLight, PAL.paper, 0.3);
+  const BROAD_D = mixHex(PAL.treeDark, PAL.ink, 0.18);
+  const PINE_D = mixHex(PAL.pine, PAL.ink, 0.3);
+  const PINE_L = mixHex(PAL.pine, PAL.treeLight, 0.55);
+  ctx.lineCap = 'round';
+
+  // 엽군 물감 한 겹: 원 대신 조금 일그러진 타원 (sc 배, 빛 반대쪽으로 off 만큼 밀어서)
+  const washPass = (pred, color, alpha, sc, off = 0) => {
     ctx.fillStyle = rgba(color, alpha);
     ctx.beginPath();
-    for (const n of idx) if (filter(tt[n + 3], n)) lobes(n, sc, seedOff);
-    ctx.fill();
-  };
-  const broad = (k) => k !== 0;
-  const pine = (k) => k === 0;
-  const BROAD = mixHex(PAL.forest, PAL.treeDark, 0.3);
-  const BROAD2 = mixHex(PAL.treeLight, PAL.forest, 0.5);
-  const all = stage < 0;
-  if (all || stage === 0) {
-  // 1) 번짐 테두리 (옅고 넓게) → 2) 몸 물감 (두 가지 빛깔을 섞어서)
-  fillLobes(broad, mixHex(BROAD, PAL.treeLight, 0.3), 0.15, 1.16);
-  fillLobes((k, n) => k !== 0 && (tt[n + 4] & 1), BROAD, 0.62, 1, 0);
-  fillLobes((k, n) => k !== 0 && !(tt[n + 4] & 1), BROAD2, 0.66, 1, 0);
-  }
-  if (all || stage === 1) {
-  fillLobes(pine, PAL.pine, 0.24, 1.15, 5);
-  fillLobes(pine, mixHex(PAL.pine, PAL.ink, 0.12), 0.74, 0.95, 5);
-  // 3) 밝은 쪽(북서) 잎 몇 점
-  ctx.fillStyle = rgba(mixHex(PAL.treeLight, PAL.paper, 0.25), 0.38);
-  ctx.beginPath();
-  const bh = batcher(ctx, 'fill', 8);
-  for (const n of idx) {
-    bh.tick();
-    const kind = tt[n + 3];
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 23);
-    const cnt = kind === 0 ? 2 : 4;
-    for (let b = 0; b < cnt; b++) {
-      const a = -2.3 + (rnd() - 0.5) * 1.6, d = r * (0.2 + rnd() * 0.35), rr = r * (0.12 + rnd() * 0.12);
-      const bx = x + Math.cos(a) * d, by = y + Math.sin(a) * d;
-      ctx.moveTo(bx + rr * 1.3, by);
-      ctx.ellipse(bx, by, rr * 1.3, rr, rnd() - 0.5, 0, TAU);
+    const bt = batcher(ctx, 'fill', 40);
+    for (const n of idx) {
+      if (!pred(n)) continue;
+      leafClusters(tt, n, CL);
+      srand(tt[n + 4] + 7);
+      for (let q = 0; q < CL.length; q += 4) {
+        const rc = CL[q + 2] * sc * (0.94 + rnd() * 0.12);
+        const cx = CL[q] - LIGHT_X * off * CL[q + 2], cy = CL[q + 1] - LIGHT_Y * off * CL[q + 2];
+        const rot = rnd() * 3;
+        ctx.moveTo(cx + rc * Math.cos(rot), cy + rc * Math.sin(rot));
+        ctx.ellipse(cx, cy, rc, rc * (0.8 + rnd() * 0.15), rot, 0, TAU);
+        bt.tick();
+      }
     }
-  }
-  bh.done();
-  // 4) 버들: 늘어진 가지 붓선
-  // 가지 끝에서 실처럼 흘러내리는 잔 붓선 (다발마다 같은 쪽으로 휘게)
-  for (const [col, al, lw, so] of [[mixHex(PAL.treeDark, PAL.ink, 0.2), 0.5, 0.055, 3], [mixHex(PAL.treeLight, PAL.paper, 0.15), 0.55, 0.05, 7]]) {
-    ctx.strokeStyle = rgba(col, al);
-    ctx.lineWidth = lw;
+    bt.done();
+  };
+
+  // ---- 0) 바탕 물감: 활엽·버들 엽군, 소나무 가지
+  if (all || stage === 0) {
+    if (detail >= 1) washPass((n) => !isPine(n), mixHex(BROAD, PAL.treeLight, 0.35), 0.12, 1.16); // 번진 테두리
+    washPass((n) => !isPine(n), BROAD_D, 0.24, 1.0, 0.22); // 그늘 쪽 덩이
+    washPass((n) => !isPine(n) && (tt[n + 4] & 1), mixHex(BROAD, PAL.treeLight, 0.3), 0.4, 0.9);
+    washPass((n) => !isPine(n) && !(tt[n + 4] & 1), mixHex(PAL.treeLight, PAL.forest, 0.5), 0.4, 0.9);
+    // 소나무 가지: 줄기에서 큰 솔잎 바퀴로 뻗는 붉은 먹빛 가지 (잎 사이로 군데군데 보인다)
+    ctx.strokeStyle = rgba(mixHex(PAL.timber, PAL.ink, 0.4), 0.7);
+    ctx.lineWidth = detail >= 1 ? 0.1 : 0.14;
     ctx.beginPath();
     for (const n of idx) {
-      if (tt[n + 3] !== 2) continue;
-      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-      srand(tt[n + 4] + so);
-      for (let c = 0; c < 7; c++) {
-        const a = rnd() * TAU, d = r * (0.25 + rnd() * 0.5);
-        const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
-        const bend = (rnd() - 0.5) * 0.8;
-        for (let b = 0; b < 6; b++) {
-          const sx = cx + (rnd() - 0.5) * r * 0.3, sy = cy + (rnd() - 0.5) * r * 0.3;
-          const L = r * (0.35 + rnd() * 0.3);
-          const ua = a + (rnd() - 0.5) * 0.5;
-          ctx.moveTo(sx, sy);
-          ctx.quadraticCurveTo(sx + Math.cos(ua) * L * 0.5 - Math.sin(ua) * bend, sy + Math.sin(ua) * L * 0.5 + Math.cos(ua) * bend + 0.15, sx + Math.cos(ua) * L, sy + Math.sin(ua) * L + 0.35);
-        }
+      if (!isPine(n)) continue;
+      leafClusters(tt, n, CL);
+      const x = tt[n], y = tt[n + 1];
+      for (let q = 4; q < CL.length; q += 8) {
+        const ex = x + (CL[q] - x) * 0.75, ey = y + (CL[q + 1] - y) * 0.75;
+        const mx = (x + ex) / 2 + (ey - y) * 0.2, my = (y + ey) / 2 - (ex - x) * 0.2;
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(mx, my, ex, ey);
       }
     }
     ctx.stroke();
   }
+
+  // ---- 1) 소나무 잎판 물감 + 버들 실가지
+  if (all || stage === 1) {
+    washPass(isPine, PINE_D, 0.24, 1.05, 0.3); // 그늘 (번짐 겸)
+    washPass(isPine, PAL.pine, 0.4, 0.84);
+    // 버들: 가지 끝에서 실처럼 흘러내리는 잔 붓선
+    for (const [col, al, lw, so] of [[mixHex(PAL.treeDark, PAL.ink, 0.2), 0.5, 0.05, 3], [mixHex(PAL.treeLight, PAL.paper, 0.15), 0.55, 0.045, 7]]) {
+      ctx.strokeStyle = rgba(col, al);
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      for (const n of idx) {
+        if (!isWillow(n)) continue;
+        const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+        srand(tt[n + 4] + so);
+        for (let c = 0; c < 7; c++) {
+          const a = rnd() * TAU, d = r * (0.25 + rnd() * 0.5);
+          const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
+          const bend = (rnd() - 0.5) * 0.8;
+          for (let b = 0; b < 6; b++) {
+            const sx = cx + (rnd() - 0.5) * r * 0.3, sy = cy + (rnd() - 0.5) * r * 0.3;
+            const L = r * (0.35 + rnd() * 0.3);
+            const ua = a + (rnd() - 0.5) * 0.5;
+            ctx.moveTo(sx, sy);
+            ctx.quadraticCurveTo(sx + Math.cos(ua) * L * 0.5 - Math.sin(ua) * bend, sy + Math.sin(ua) * L * 0.5 + Math.cos(ua) * bend + 0.15, sx + Math.cos(ua) * L, sy + Math.sin(ua) * L + 0.35);
+          }
+        }
+      }
+      ctx.stroke();
+    }
   }
-  if (all || stage === 2 || stage === 3) {
-  // 5) 점엽: 가로로 누운 먹 점 (그늘 쪽·가장자리에 많이)
-  for (const [al, dark] of [[0.3, false], [0.55, true]]) {
-    if (!all && stage !== (dark ? 3 : 2)) continue;
-    ctx.fillStyle = rgba(dark ? PAL.ink : mixHex(PAL.ink, PAL.treeDark, 0.5), al);
+
+  // ---- 2·3·4) 활엽 미점(짧게 누운 붓 점): 중간 → 그늘 짙은 점 → 볕 밝은 점 (4 에서 소나무 짙은 솔잎, 5 에서 밝은 솔잎·먹)
+  // 점마다 빛 받는 정도로 농담을 가른다: 0 짙게, 1 중간, 2 밝게
+  const dabs = (want, color, alpha, lw, len, seedOff) => {
+    ctx.strokeStyle = rgba(color, alpha);
+    ctx.lineWidth = lw;
     ctx.beginPath();
-    const bt = batcher(ctx, 'fill', 24);
+    const bt = batcher(ctx, 'stroke', 64);
     for (const n of idx) {
-      const kind = tt[n + 3];
-      if (kind === 0 || kind === 2) continue;
-      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-      srand(tt[n + 4] + (dark ? 31 : 11));
-      const cnt = Math.round((kind === 3 ? 2.6 : 1.9) * r * r * (dark ? 0.45 : 1));
-      for (let b = 0; b < cnt; b++) {
-        const a = rnd() * TAU, d = r * Math.sqrt(0.08 + rnd() * 0.84);
-        const shade = Math.cos(a - 0.85);
-        if (shade < -0.35 && rnd() < 0.75) continue;
-        if (dark && shade < 0.1) continue;
-        const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d;
-        const rr = r * (0.055 + rnd() * 0.05);
-        const rot = (rnd() - 0.5) * 0.7;
-        // 누운 붓 점 (작아서 마름모 넷 꼭짓점이면 충분 — 타원보다 훨씬 싸다)
-        const ca = Math.cos(rot), sa = Math.sin(rot), lx = rr * 1.9, ly = rr * 0.85;
-        ctx.moveTo(dx + ca * lx, dy + sa * lx);
-        ctx.lineTo(dx - sa * ly + ca * lx * 0.1, dy + ca * ly + sa * lx * 0.1);
-        ctx.lineTo(dx - ca * lx, dy - sa * lx);
-        ctx.lineTo(dx + sa * ly * 0.8, dy - ca * ly * 0.8);
-        ctx.closePath();
-        bt.tick();
+      if (!isBroad(n)) continue;
+      const big = tt[n + 3] === 3;
+      leafClusters(tt, n, CL);
+      srand(tt[n + 4] + seedOff);
+      for (let q = 0; q < CL.length; q += 4) {
+        const cx = CL[q], cy = CL[q + 1], rc = CL[q + 2], cl = CL[q + 3];
+        const cnt = Math.round(rc * rc * (big ? 14 : 16) * detail) + 2;
+        for (let m = 0; m < cnt; m++) {
+          const a = rnd() * TAU, d = rc * Math.sqrt(rnd()) * 0.98;
+          const ux = Math.cos(a), uy = Math.sin(a);
+          const lit = cl * 0.45 + (ux * LIGHT_X + uy * LIGHT_Y) * (d / rc) * 0.75 + (rnd() - 0.5) * 0.55;
+          const tone = lit > 0.32 ? 2 : lit < -0.22 ? 0 : 1;
+          const tilt = (rnd() - 0.5) * 0.7, l = len * (0.7 + rnd() * 0.6);
+          if (tone !== want) continue;
+          const px = cx + ux * d, py = cy + uy * d;
+          const tx = Math.cos(tilt) * l * 0.5, ty = Math.sin(tilt) * l * 0.5;
+          ctx.moveTo(px - tx, py - ty);
+          ctx.lineTo(px + tx, py + ty);
+          bt.tick();
+        }
       }
     }
     bt.done();
+  };
+  const dw = detail >= 1 ? 0.33 : 0.42;
+  if (all || stage === 2) dabs(1, mixHex(PAL.treeDark, PAL.forest, 0.35), 0.62, dw * 1.1, 0.1, 11); // 둥근 점
+  if (all || stage === 3) dabs(0, mixHex(PAL.treeDark, PAL.ink, 0.35), 0.6, dw, 0.18, 11); // 누운 점(미점)
+  if (all || stage === 4) {
+    dabs(2, BROAD_L, 0.72, dw * 0.9, 0.14, 11);
+    // 소나무 솔잎: 솔잎 바퀴(차륜) — 가운데서 사방으로 뻗는 바늘 묶음. 그늘 바퀴는 짙게 먼저, 볕 바퀴는 밝게 위에
+    needles(0);
   }
+  if (all || stage === 5) {
+    needles(1);
+    needles(2);
   }
-  if (all || stage === 3) {
-  // 6) 솔잎: 진한 먹 바늘 덩어리 (방사형 짧은 획)
-  ctx.lineCap = 'round';
-  for (const [al, w, sc, so] of [[0.4, 0.05, 1.05, 13], [0.68, 0.065, 0.8, 37]]) {
-    ctx.strokeStyle = rgba(PAL.ink, al);
-    ctx.lineWidth = w;
+  /** 솔잎 한 겹. pass 0: 모든 바퀴 짙은 솔잎, 1: 볕 받는 바퀴에 밝은 솔잎을 엇갈려 덧, 2: 그늘 바퀴에 먹 */
+  function needles(pass) {
+    const nlw = detail >= 1 ? 1 : 1.6;
+    const [col, al, lw] = [[PINE_D, 0.62, 0.045], [PINE_L, 0.7, 0.04], [PAL.ink, 0.32, 0.035]][pass];
+    ctx.strokeStyle = rgba(col, al);
+    ctx.lineWidth = lw * nlw;
     ctx.beginPath();
-    const bt = batcher(ctx, 'stroke', 6);
+    const bt = batcher(ctx, 'stroke', 16);
     for (const n of idx) {
-      if (tt[n + 3] !== 0) continue;
-      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-      srand(tt[n + 4] + so);
-      const clusters = 4 + ((rnd() * 3) | 0);
-      for (let c = 0; c < clusters; c++) {
-        const a = rnd() * TAU, d = r * (0.12 + rnd() * 0.5);
-        const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
-        const L = r * (0.2 + rnd() * 0.12) * sc;
+      if (!isPine(n)) continue;
+      leafClusters(tt, n, CL);
+      for (let q = 0; q < CL.length; q += 4) {
+        const cx = CL[q], cy = CL[q + 1], rc = CL[q + 2], sun = CL[q + 3];
+        if ((pass === 1 && sun < 0.1) || (pass === 2 && sun > -0.2)) continue;
+        srand(tt[n + 4] + q * 13 + 37 + pass * 5);
+        const K = Math.max(4, Math.round((7 + rc * 6) * (detail >= 1 ? 1 : 0.55) * (pass === 1 ? 0.55 : pass === 2 ? 0.4 : 1)));
         const a0 = rnd() * TAU;
-        for (let k = 0; k < 8; k++) {
-          const aa = a0 + (k / 8) * TAU + (rnd() - 0.5) * 0.3;
-          ctx.moveTo(cx + Math.cos(aa) * L * 0.2, cy + Math.sin(aa) * L * 0.2);
-          ctx.lineTo(cx + Math.cos(aa) * L, cy + Math.sin(aa) * L);
+        for (let s = 0; s < K; s++) {
+          const aa = a0 + (s / K) * TAU + (rnd() - 0.5) * 0.35;
+          const ln = rc * (pass === 1 ? 0.6 + rnd() * 0.3 : 0.8 + rnd() * 0.3);
+          const ca = Math.cos(aa), sa = Math.sin(aa);
+          ctx.moveTo(cx + ca * rc * 0.12, cy + sa * rc * 0.12);
+          ctx.lineTo(cx + ca * ln, cy + sa * ln);
         }
         bt.tick();
       }
     }
     bt.done();
   }
-  }
-  if (all || stage === 4) {
-  // 7) 활엽 외곽 먹선 일부 (남동쪽 호, 끊어지게)
-  ctx.strokeStyle = rgba(PAL.ink, 0.3);
-  ctx.lineWidth = 0.07;
-  ctx.beginPath();
-  const bo = batcher(ctx, 'stroke', 16);
-  for (const n of idx) {
-    const kind = tt[n + 3];
-    if (kind === 0 || kind === 2) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    bo.tick();
-    srand(tt[n + 4] + 17);
-    for (let q = 0; q < 2; q++) {
-      const a0 = -0.2 + q * 1.1 + rnd() * 0.4, a1 = a0 + 0.5 + rnd() * 0.5;
-      const rr = r * (0.86 + rnd() * 0.1);
-      ctx.moveTo(x + Math.cos(a0) * rr, y + Math.sin(a0) * rr);
-      ctx.arc(x, y, rr, a0, a1);
+
+  // ---- 6) 먹: 그늘 쪽 먹 점(태점처럼), 엽군 가장자리의 끊긴 먹선, 감 열매
+  if (all || stage === 6) {
+    ctx.strokeStyle = rgba(PAL.ink, 0.5);
+    ctx.lineWidth = 0.12;
+    ctx.beginPath();
+    let bt = batcher(ctx, 'stroke', 64);
+    for (const n of idx) {
+      const kind = tt[n + 3];
+      if (kind === 2) continue;
+      leafClusters(tt, n, CL);
+      srand(tt[n + 4] + 61);
+      for (let q = 0; q < CL.length; q += 4) {
+        const cx = CL[q], cy = CL[q + 1], rc = CL[q + 2], cl = CL[q + 3];
+        if (cl > 0.3 && rnd() < 0.7) continue;
+        if (kind === 0) continue; // 소나무는 솔잎 먹으로 충분
+        const cnt = Math.round(2.5 * rc * detail + rnd());
+        for (let m = 0; m < cnt; m++) {
+          // 빛 반대쪽(남동) 가장자리에 모인다
+          const a = Math.atan2(-LIGHT_Y, -LIGHT_X) + (rnd() - 0.5) * 2.4, d = rc * (0.55 + rnd() * 0.45);
+          const px = cx + Math.cos(a) * d, py = cy + Math.sin(a) * d;
+          const tl = (rnd() - 0.5) * 0.8, l = 0.07 + rnd() * 0.08;
+          ctx.moveTo(px - Math.cos(tl) * l, py - Math.sin(tl) * l);
+          ctx.lineTo(px + Math.cos(tl) * l, py + Math.sin(tl) * l);
+          bt.tick();
+        }
+      }
     }
-  }
-  bo.done();
-  // 8) 감나무 열매
-  ctx.fillStyle = rgba(PAL.dusk, 0.85);
-  ctx.beginPath();
-  for (const n of idx) {
-    if (tt[n + 3] !== 4) continue;
-    const x = tt[n], y = tt[n + 1], r = tt[n + 2];
-    srand(tt[n + 4] + 19);
-    for (let b = 0; b < 6; b++) {
-      const a = rnd() * TAU, d = r * rnd() * 0.75;
-      const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d;
-      ctx.moveTo(dx + 0.13, dy);
-      ctx.arc(dx, dy, 0.13, 0, TAU);
+    bt.done();
+    // 활엽 엽군 가장자리: 그늘 쪽으로 끊어진 가는 먹선 몇 획
+    ctx.strokeStyle = rgba(PAL.ink, 0.28);
+    ctx.lineWidth = 0.05;
+    ctx.beginPath();
+    bt = batcher(ctx, 'stroke', 32);
+    for (const n of idx) {
+      if (!isBroad(n)) continue;
+      leafClusters(tt, n, CL);
+      srand(tt[n + 4] + 17);
+      for (let q = 4; q < CL.length; q += 4) {
+        if (CL[q + 3] > 0.1 || rnd() < 0.35) continue;
+        const cx = CL[q], cy = CL[q + 1], rc = CL[q + 2] * 1.02;
+        const a0 = Math.atan2(-LIGHT_Y, -LIGHT_X) - 0.9 + rnd() * 0.8, a1 = a0 + 0.5 + rnd() * 0.7;
+        ctx.moveTo(cx + Math.cos(a0) * rc, cy + Math.sin(a0) * rc);
+        ctx.arc(cx, cy, rc, a0, a1);
+        bt.tick();
+      }
     }
-  }
-  ctx.fill();
+    bt.done();
+    // 감나무 열매
+    ctx.fillStyle = rgba(PAL.dusk, 0.85);
+    ctx.beginPath();
+    for (const n of idx) {
+      if (tt[n + 3] !== 4) continue;
+      const x = tt[n], y = tt[n + 1], r = tt[n + 2];
+      srand(tt[n + 4] + 19);
+      for (let b = 0; b < 6; b++) {
+        const a = rnd() * TAU, d = r * rnd() * 0.75;
+        const dx = x + Math.cos(a) * d, dy = y + Math.sin(a) * d;
+        ctx.moveTo(dx + 0.13, dy);
+        ctx.arc(dx, dy, 0.13, 0, TAU);
+      }
+    }
+    ctx.fill();
   }
   return idx.length;
 }

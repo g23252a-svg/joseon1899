@@ -2,6 +2,8 @@
 //  - GROUND: 청크(64m) 캐시. 바탕 물감층(약 2.5px/m ImageData, 번짐·얼룩·종이 비침) → 부드럽게 확대 →
 //    고해상도(10px/m) 먹 디테일(해안 먹선·물결·논둑·밭고랑·길 가장자리·준법·바위·철로·다리·성벽·그림자) → 한지 섬유.
 //    멀리 볼 때는 128m·4px/m 거친 청크. 아직 없는 청크는 전체 지도(mapCanvas) 확대로 임시 표시.
+//    시작·순간이동(카메라 도약)이면 착지할 화면의 땅·수관·지붕을 그 프레임에 동기로 그리고(syncBudget),
+//    평소에는 남는 예산으로 화면 둘레와 이동 방향 앞쪽(속도 × 2.5초)을 미리 그린다.
 //  - DECAL: 물 위에서 천천히 움직이는 붓선(흐름·잔물결).
 //  - HIGH: 나무 수관 청크 캐시(플레이어 주변은 구멍을 내어 비침) + 지붕(structures.RoofRenderer).
 //  - 전체 지도 mapCanvas(0.5px/m, 지명 없음).
@@ -165,10 +167,15 @@ export class WorldRenderer {
     this._vk = new Int32Array(9);
     this._vb = new Float32Array(9);
     this._gEst = [2, 2, 1, 1, 0.5, 0]; // 청크 단계별 예상 시간(ms, 지수 평균)
-    this._cEst = [1.5, 1.5, 1.5, 1.5, 0.3, 0]; // 수관 단계별
+    this._cEst = new Array(CANOPY_STAGES + 1).fill(1.5); // 수관 단계별 예상 시간(ms)
+    this._cEst[CANOPY_STAGES] = 0;
     this.canopy = new Map(); // key → {canvas|null}
     this.canopyJobs = new Map(); // key → 그리는 중인 수관 작업
     this.workBudget = 3.6; // 프레임당 만들기 작업(땅 청크·수관·지붕 캐시) 시간 예산(ms)
+    this.syncBudget = 260; // 시작·순간이동 때 착지 화면을 한 번에 그리는 최대 시간(ms)
+    this._syncUntil = 0; // 이 시각까지는 동기 그리기 (drawGround 가 정한다)
+    this.landing = null; // 착지할 화면 사각형 (도약 중일 때만)
+    this.flying = false; // 카메라가 먼 곳으로 날아가는 중
     this._frameT0 = 0;
     this.canopyPool = [[], []];
     // 수관 캐시 단계: 보통 64m·8px/m, 가까이 볼 때 32m·20px/m
@@ -1000,9 +1007,10 @@ export class WorldRenderer {
       const s = Math.hypot(sl.x, sl.y) * 260;
       if (s < 0.12) return;
       const strong = t === T.MOUNTAIN || t === T.ROCK;
-      const p = (0.22 + Math.min(1, s) * 0.55) * (strong ? 1 : t === T.FOREST ? 0.25 : 0.5);
+      // 가파를수록 많이. 가까이 볼 때(작은 청크)는 성기게 해 빗질 자국처럼 보이지 않게
+      const p = (0.16 + Math.min(1, s) * 0.5) * (strong ? 1 : t === T.FOREST ? 0.22 : 0.45);
       if (h > p) {
-        if (lod === 0 && strong && hh > 0.42 && h > 0.93 && hash2(gx, gy, 95) < hh - 0.3) dots.push(x, y);
+        if (lod === 0 && strong && hh > 0.42 && h > 0.95 && hash2(gx, gy, 95) < hh - 0.3) dots.push(x, y, hash2(gx, gy, 96));
         return;
       }
       let dx = -sl.x, dy = -sl.y;
@@ -1014,12 +1022,12 @@ export class WorldRenderer {
       const ux = dx * c - dy * sn, uy = dx * sn + dy * c;
       const facing = ux * 0.62 + uy * 0.78;
       const b = facing > 0.3 ? 2 : facing > -0.35 ? 1 : 0;
-      const L = (1.1 + Math.min(1.6, s) * 1.6 + hash2(gx, gy, 93) * 1.2) * (lod ? 1.7 : 1);
+      const L = (0.9 + Math.min(1.6, s) * 1.1 + hash2(gx, gy, 93) * 1.0) * (lod ? 1.7 : 1);
       const bend = (hash2(gx, gy, 94) - 0.5) * L * 0.35;
       P[b].push(x - ux * L * 0.35, y - uy * L * 0.35, x - uy * bend, y + ux * bend, x + ux * L * 0.65, y + uy * L * 0.65);
     });
     const col = mixHex(PAL.ink, PAL.mountain, 0.25);
-    const A = [0.12, 0.22, 0.36];
+    const A = [0.1, 0.18, 0.3];
     for (let b = 0; b < 3; b++) {
       const L = P[b];
       if (!L.length) continue;
@@ -1036,17 +1044,16 @@ export class WorldRenderer {
     }
     // 태점 (산꼭대기 이끼점)
     if (dots.length) {
-      ctx.fillStyle = rgba(PAL.ink, 0.55);
+      ctx.strokeStyle = rgba(PAL.ink, 0.5);
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 0.2;
       ctx.beginPath();
-      for (let k = 0; k < dots.length; k += 2) {
-        for (let q = 0; q < 3; q++) {
-          const a = q * 2.1 + dots[k] * 0.7, d = 0.35 + q * 0.12;
-          const px = dots[k] + Math.cos(a) * d, py = dots[k + 1] + Math.sin(a) * d, r = 0.12 + q * 0.03;
-          ctx.moveTo(px + r * 1.4, py);
-          ctx.ellipse(px, py, r * 1.4, r, a, 0, TAU);
-        }
+      for (let k = 0; k < dots.length; k += 3) {
+        const l = 0.12 + dots[k + 2] * 0.16, tl = (dots[k + 2] - 0.5) * 0.6;
+        ctx.moveTo(dots[k] - Math.cos(tl) * l, dots[k + 1] - Math.sin(tl) * l);
+        ctx.lineTo(dots[k] + Math.cos(tl) * l, dots[k + 1] + Math.sin(tl) * l);
       }
-      ctx.fill();
+      ctx.stroke();
     }
     // 바위
     const seg = [];
@@ -1488,33 +1495,44 @@ export class WorldRenderer {
         }
       }
     if (!idx.length) return;
-    const pass = (col, a, rs, ox, oy, pine) => {
+    // 나무마다 덩이 셋(씨앗으로 고정된 자리)을 겹쳐 둥근 원 하나로 보이지 않게
+    const LOB = [[0, 0, 0.62], [0.36, 0.2, 0.5], [-0.3, 0.28, 0.48], [0.05, -0.36, 0.46]];
+    const pass = (col, a, rs, ox, oy, pine, lobes = 4) => {
       ctx.fillStyle = rgba(col, a);
       ctx.beginPath();
       for (const n of idx) {
         if (pine !== undefined && (tt[n + 3] === 0) !== pine) continue;
-        const r = tt[n + 2] * rs;
-        ctx.moveTo(tt[n] + ox + r, tt[n + 1] + oy);
-        ctx.arc(tt[n] + ox, tt[n + 1] + oy, r, 0, TAU);
-      }
-      ctx.fill();
-    };
-    pass('#3a4030', 0.16, 0.95, 0.5, 0.6);
-    pass(mixHex(PAL.forest, PAL.treeDark, 0.3), 0.8, 0.82, 0, 0, false);
-    pass(PAL.pine, 0.82, 0.74, 0, 0, true);
-    pass(PAL.treeLight, 0.45, 0.4, -0.5, -0.6);
-    if (withInk) {
-      ctx.fillStyle = rgba(PAL.ink, 0.4);
-      ctx.beginPath();
-      for (const n of idx) {
-        const r = tt[n + 2];
-        for (let q = 0; q < 3; q++) {
-          const a = 0.3 + q * 0.9, px = tt[n] + Math.cos(a) * r * 0.5, py = tt[n + 1] + Math.sin(a) * r * 0.5;
-          ctx.moveTo(px + r * 0.16, py);
-          ctx.arc(px, py, r * 0.16, 0, TAU);
+        const r = tt[n + 2], s = tt[n + 4], rot = (s & 1023) * 0.00614;
+        const c = Math.cos(rot), sn = Math.sin(rot);
+        for (let q = 0; q < lobes; q++) {
+          const [lx, ly, lr] = LOB[q];
+          const px = tt[n] + (lx * c - ly * sn) * r + ox, py = tt[n + 1] + (lx * sn + ly * c) * r + oy, rr = lr * r * rs;
+          ctx.moveTo(px + rr, py);
+          ctx.arc(px, py, rr, 0, TAU);
         }
       }
       ctx.fill();
+    };
+    pass('#3a4030', 0.14, 1.5, 0.5, 0.6, undefined, 1);
+    pass(mixHex(PAL.forest, PAL.treeDark, 0.3), 0.7, 1, 0, 0, false, 3);
+    pass(PAL.pine, 0.75, 0.95, 0, 0, true, 3);
+    pass(mixHex(PAL.treeLight, PAL.paper, 0.2), 0.42, 0.75, -0.45, -0.6, false, 1);
+    pass(mixHex(PAL.pine, PAL.treeLight, 0.5), 0.38, 0.7, -0.4, -0.5, true, 1);
+    if (withInk) {
+      // 그늘 쪽 먹 점 (누운 점)
+      ctx.strokeStyle = rgba(PAL.ink, 0.42);
+      ctx.lineWidth = 0.35;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (const n of idx) {
+        const r = tt[n + 2], s = tt[n + 4];
+        // 한 획만, 남동쪽 가장자리에 비스듬히 (둘이면 눈처럼 보인다)
+        const a = 0.45 + (s & 7) * 0.12, px = tt[n] + Math.cos(a) * r * 0.6, py = tt[n + 1] + Math.sin(a) * r * 0.6;
+        const tl = ((s >> 3) & 7) * 0.1 - 0.35;
+        ctx.moveTo(px - Math.cos(tl) * r * 0.16, py - Math.sin(tl) * r * 0.16);
+        ctx.lineTo(px + Math.cos(tl) * r * 0.16, py + Math.sin(tl) * r * 0.16);
+      }
+      ctx.stroke();
     }
   }
 
@@ -1648,10 +1666,91 @@ export class WorldRenderer {
     }
   }
 
+  /** 다시 쓰는 임시 배열 (비워서) */
+  _clr(name) {
+    const a = this[name] || (this[name] = []);
+    a.length = 0;
+    return a;
+  }
+
+  /**
+   * 사각형 안의 청크 키를 (ox,oy) 에서 가까운 순으로 out 에 (keyFn(ci,cj)). cs: 청크 크기
+   */
+  _keysIn(cs, x0, y0, x1, y1, ox, oy, keyFn, out = []) {
+    const W = this.tr.w, H = this.tr.h;
+    if (!(x1 > x0 && y1 > y0)) return out; // NaN·빈 사각형
+    const ci0 = Math.max(0, Math.floor(x0 / cs)), ci1 = Math.min(Math.ceil(W / cs) - 1, Math.floor(x1 / cs));
+    const cj0 = Math.max(0, Math.floor(y0 / cs)), cj1 = Math.min(Math.ceil(H / cs) - 1, Math.floor(y1 / cs));
+    const tmp = this._kd || (this._kd = []);
+    tmp.length = 0;
+    for (let cj = cj0; cj <= cj1; cj++)
+      for (let ci = ci0; ci <= ci1; ci++) {
+        const dx = (ci + 0.5) * cs - ox, dy = (cj + 0.5) * cs - oy;
+        tmp.push(dx * dx + dy * dy, keyFn(ci, cj), ci, cj);
+      }
+    const n = tmp.length / 4;
+    const ord = this._ko || (this._ko = []);
+    ord.length = 0;
+    for (let i = 0; i < n; i++) ord.push(i);
+    ord.sort((a, b) => tmp[a * 4] - tmp[b * 4]);
+    for (const i of ord) out.push(tmp[i * 4 + 1], tmp[i * 4 + 2], tmp[i * 4 + 3]);
+    return out; // [key, ci, cj, key, ci, cj, ...]
+  }
+
+  /** 땅 청크 작업을 until(시각)까지 진행 (force 면 적어도 한 단계). 캐시에 들어가면 true */
+  _advance(tier, k, ci, cj, until, force = false) {
+    let job = this.jobs.get(k);
+    if (!job) {
+      job = this._newJob(tier, ci, cj);
+      this.jobs.set(k, job);
+    }
+    let first = force;
+    while (first || now() + this._gEst[job.stage] * 0.7 < until) {
+      first = false;
+      if (this._stepJob(job)) {
+        this.jobs.delete(k);
+        if (!job.failed) this.cache.set(k, { canvas: job.canvas, tier: tier.id, ci: job.ci, cj: job.cj });
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 카메라가 향하는 곳 (오버라이드 > 따라가는 대상 + 내다보기). 없으면 null.
+   * 순간이동·컷신으로 카메라가 크게 움직일 때 착지할 화면을 미리 그리는 데 쓴다.
+   */
+  _aimPoint(game) {
+    const cam = game.camera, o = cam.override;
+    const t = game.cameraTarget || game.player?.vehicle || game.player;
+    let x = t ? t.x + (Number.isFinite(t.vx) ? t.vx : 0) * (cam.lookAhead || 0) : cam.x;
+    let y = t ? t.y + (Number.isFinite(t.vy) ? t.vy : 0) * (cam.lookAhead || 0) : cam.y;
+    if (o) {
+      if (Number.isFinite(o.x)) x = o.x;
+      if (Number.isFinite(o.y)) y = o.y;
+    }
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  }
+
+  /** 카메라가 따라가는 것의 속도 (vx/vy 가 없으면 speed·angle 로) — 앞쪽 미리 그리기용 */
+  _vel(game) {
+    const t = game.cameraTarget || game.player?.vehicle || game.player;
+    const o = this._velO || (this._velO = { vx: 0, vy: 0 });
+    let vx = Number.isFinite(t?.vx) ? t.vx : 0, vy = Number.isFinite(t?.vy) ? t.vy : 0;
+    if (!vx && !vy && Number.isFinite(t?.speed) && Number.isFinite(t?.angle)) {
+      vx = Math.cos(t.angle) * t.speed;
+      vy = Math.sin(t.angle) * t.speed;
+    }
+    o.vx = vx;
+    o.vy = vy;
+    return o;
+  }
+
   /** GROUND 층 */
   drawGround(ctx, game, view) {
     const fr0 = now();
     this._frameT0 = fr0;
+    this._syncUntil = 0;
     const cam = game.camera;
     const zpx = (cam.zoom || 14) * (cam.dpr || 1);
     // 단계 고르기 (경계에서 깜박이지 않게 6% 여유)
@@ -1664,100 +1763,110 @@ export class WorldRenderer {
     }
     const tier = this.tiers[tid];
     this.curTier = tier.id;
-    const cs = tier.cs, W = this.tr.w, H = this.tr.h;
-    const ci0 = Math.max(0, Math.floor(view.x0 / cs)), ci1 = Math.min(Math.ceil(W / cs) - 1, Math.floor(view.x1 / cs));
-    const cj0 = Math.max(0, Math.floor(view.y0 / cs)), cj1 = Math.min(Math.ceil(H / cs) - 1, Math.floor(view.y1 / cs));
-    const eps = 0.8 / zpx;
-    const missing = [];
-    ctx.imageSmoothingEnabled = true;
-    for (let cj = cj0; cj <= cj1; cj++)
-      for (let ci = ci0; ci <= ci1; ci++) {
-        const k = this._key(tier.id, ci, cj);
+    const cs = tier.cs;
+    const tkey = (ci, cj) => this._key(tier.id, ci, cj);
+    const vw = view.x1 - view.x0, vh = view.y1 - view.y0;
+
+    // ---- 카메라 도약 감지: 시작·순간이동(snap) 또는 대상이 멀리 튀어 카메라가 날아가는 중
+    const aim = this._aimPoint(game) || { x: cam.x, y: cam.y };
+    const lc = this._lastCam || (this._lastCam = { x: NaN, y: NaN, ax: NaN, ay: NaN });
+    const thr = Math.max(20, Math.min(vw, vh) * 0.35);
+    const jumped = !(Math.abs(cam.x - lc.x) + Math.abs(cam.y - lc.y) <= thr) || !(Math.abs(aim.x - lc.ax) + Math.abs(aim.y - lc.ay) <= thr);
+    const farThr = Math.max(30, Math.min(vw, vh) * 0.6);
+    const aimD = Math.hypot(aim.x - cam.x, aim.y - cam.y);
+    const far = aimD > farThr;
+    this._flyN = far ? (this._flyN || 0) + 1 : 0;
+    const flying = far && this._flyN < 150; // 2.5초 넘게 못 따라붙으면(이상한 경우) 평소처럼
+    lc.x = cam.x;
+    lc.y = cam.y;
+    lc.ax = aim.x;
+    lc.ay = aim.y;
+    this.flying = flying;
+    this.landing = null;
+    let nLand = 0;
+    if (jumped || flying) {
+      // 착지할 화면을 동기로 그린다 (땅 → 이어서 같은 프레임에 수관·지붕도)
+      const lx = flying ? aim.x : cam.x, ly = flying ? aim.y : cam.y;
+      // 날아가기가 끝나는 곳(목표에서 farThr 앞)까지 덮는다
+      const ex = flying ? ((cam.x - aim.x) / aimD) * farThr : 0, ey = flying ? ((cam.y - aim.y) / aimD) * farThr : 0;
+      const land = this._land || (this._land = { x0: 0, y0: 0, x1: 0, y1: 0 });
+      land.x0 = lx + Math.min(0, ex) - vw / 2;
+      land.y0 = ly + Math.min(0, ey) - vh / 2;
+      land.x1 = lx + Math.max(0, ex) + vw / 2;
+      land.y1 = ly + Math.max(0, ey) + vh / 2;
+      this.landing = land;
+      this._syncUntil = fr0 + this.syncBudget;
+      const ks = this._keysIn(cs, land.x0, land.y0, land.x1, land.y1, lx, ly, tkey, this._clr('_lk'));
+      nLand = ks.length / 3;
+      for (let q = 0; q < ks.length; q += 3) {
+        const k = ks[q];
         const e = this.cache.get(k);
         if (e) {
-          this.cache.delete(k);
+          this.cache.delete(k); // 최근 사용으로 (날아가는 동안 밀려나지 않게)
           this.cache.set(k, e);
-          ctx.drawImage(e.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
-        } else missing.push(k);
+        } else if (now() < this._syncUntil) this._advance(tier, k, ks[q + 1], ks[q + 2], this._syncUntil, true);
       }
-    const budget = this.frameBudget;
-    if (missing.length) {
-      const cx = cam.x, cy = cam.y;
-      const cen = (k) => [((Math.floor(k / 4096) % 4096) + 0.5) * cs - cx, ((k % 4096) + 0.5) * cs - cy];
-      missing.sort((a, b) => Math.hypot(...cen(a)) - Math.hypot(...cen(b)));
-      // 가까운 것부터 단계를 진행 (적어도 한 단계는)
-      let steps = 0;
-      for (const k of missing) {
-        let job = this.jobs.get(k);
-        if (!job) {
-          job = this._newJob(tier, Math.floor(k / 4096) % 4096, k % 4096);
-          this.jobs.set(k, job);
-        }
-        while (steps === 0 || now() - fr0 + this._gEst[job.stage] * 0.7 < budget) {
-          steps++;
-          if (this._stepJob(job)) {
-            this.jobs.delete(k);
-            if (!job.failed) this.cache.set(k, { canvas: job.canvas, tier: tier.id, ci: job.ci, cj: job.cj });
-            break;
-          }
-        }
-        if (now() - fr0 >= budget) break;
-      }
-      for (const k of missing) {
-        const ci = Math.floor(k / 4096) % 4096, cj = k % 4096;
-        const e = this.cache.get(k);
-        if (e) ctx.drawImage(e.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
-        else this.drawFallback(ctx, tier, ci, cj, eps);
-      }
-    } else if (now() - fr0 < budget * 0.5 && this.workLeft() > 1.5) {
-      // 여유가 있으면 이동 방향 앞쪽 청크를 한 단계씩 미리
-      this.prefetch(tier, view, game, fr0 + budget * 0.6);
     }
+
+    // ---- 화면 안 청크
+    const eps = 0.8 / zpx;
+    ctx.imageSmoothingEnabled = true;
+    const vk = this._keysIn(cs, view.x0, view.y0, view.x1, view.y1, cam.x, cam.y, tkey, this._clr('_vk2'));
+    const budget = this.frameBudget;
+    let steps = 0, missing = 0;
+    for (let q = 0; q < vk.length; q += 3) {
+      const k = vk[q], ci = vk[q + 1], cj = vk[q + 2];
+      let e = this.cache.get(k);
+      if (e) {
+        this.cache.delete(k);
+        this.cache.set(k, e);
+      } else if (!flying && (steps === 0 || now() - fr0 + this._gEst[this.jobs.get(k)?.stage ?? 0] * 0.7 < budget)) {
+        // 가까운 것부터 단계를 진행 (가장 가까운 것은 적어도 한 단계). 날아가는 중에는 스쳐 갈 화면이라 만들지 않는다
+        if (this._advance(tier, k, ci, cj, fr0 + budget, steps === 0)) e = this.cache.get(k);
+        steps++;
+      }
+      if (e) ctx.drawImage(e.canvas, ci * cs, cj * cs, cs + eps, cs + eps);
+      else {
+        missing++;
+        this.drawFallback(ctx, tier, ci, cj, eps);
+      }
+    }
+    this.stats.missing = missing;
+    // ---- 여유가 있으면 이동 방향 앞쪽 청크를 미리
+    if (!flying && !missing && now() - fr0 < budget * 0.6 && this.workLeft() > 1.2) this.prefetch(tier, view, game, Math.min(fr0 + budget, now() + this.workLeft() * 0.6));
     // 오래 버려진 작업 정리
     if (this.jobs.size > 12) {
       for (const [k, j] of this.jobs) {
         if (this.jobs.size <= 8) break;
-        if (j.canvas) this.pool[j.tier.id].push(j.canvas);
-        if (j.buf) this._bufPool[j.tier.id].push(j.buf);
+        if (j.canvas && this.pool[j.tier.id].length < 6) this.pool[j.tier.id].push(j.canvas);
+        if (j.buf && this._bufPool[j.tier.id].length < 4) this._bufPool[j.tier.id].push(j.buf);
         this.jobs.delete(k);
       }
     }
-    this._evict(this.cache, tier.max + 10, this.pool);
+    // 화면이 넓으면(큰 모니터·멀리 보기) 보이는 청크 수만큼은 늘 남긴다 — 안 그러면 매 프레임 지웠다 다시 그린다
+    const nVis = vk.length / 3;
+    this._evict(this.cache, Math.max(tier.max, Math.ceil(nVis * 2.2) + nLand + 6) + 10, this.pool);
     this.stats.frameMs = now() - fr0;
   }
 
+  /** 이동 방향 앞쪽(속도 × 몇 초)과 화면 둘레 반 청크를 가까운 것부터 미리 그린다 */
   prefetch(tier, view, game, until) {
-    const cs = tier.cs, W = this.tr.w, H = this.tr.h;
-    if (this.cache.size >= tier.max) return;
-    const tgt = game.player?.vehicle || game.player;
-    const vx = tgt?.vx || 0, vy = tgt?.vy || 0;
-    const ax = view.x0 + Math.min(0, vx * 4) - cs * 0.5, bx = view.x1 + Math.max(0, vx * 4) + cs * 0.5;
-    const ay = view.y0 + Math.min(0, vy * 4) - cs * 0.5, by = view.y1 + Math.max(0, vy * 4) + cs * 0.5;
-    let best = -1, bd = Infinity;
-    const cx = (view.x0 + view.x1) / 2 + vx * 3, cy = (view.y0 + view.y1) / 2 + vy * 3;
-    for (let cj = Math.max(0, Math.floor(ay / cs)); cj <= Math.min(Math.ceil(H / cs) - 1, Math.floor(by / cs)); cj++)
-      for (let ci = Math.max(0, Math.floor(ax / cs)); ci <= Math.min(Math.ceil(W / cs) - 1, Math.floor(bx / cs)); ci++) {
-        const k = this._key(tier.id, ci, cj);
-        if (this.cache.has(k)) continue;
-        const d = Math.hypot((ci + 0.5) * cs - cx, (cj + 0.5) * cs - cy);
-        if (d < bd) {
-          bd = d;
-          best = k;
-        }
-      }
-    if (best < 0) return;
-    let job = this.jobs.get(best);
-    if (!job) {
-      job = this._newJob(tier, Math.floor(best / 4096) % 4096, best % 4096);
-      this.jobs.set(best, job);
+    const cs = tier.cs;
+    const { vx, vy } = this._vel(game);
+    const lead = 2.5; // 초
+    const m = cs * 0.5;
+    const ax = view.x0 - m + Math.min(0, vx * lead), bx = view.x1 + m + Math.max(0, vx * lead);
+    const ay = view.y0 - m + Math.min(0, vy * lead), by = view.y1 + m + Math.max(0, vy * lead);
+    const cx = (view.x0 + view.x1) / 2 + vx * lead * 0.6, cy = (view.y0 + view.y1) / 2 + vy * lead * 0.6;
+    const ks = this._keysIn(cs, ax, ay, bx, by, cx, cy, (ci, cj) => this._key(tier.id, ci, cj), this._clr('_pk'));
+    let n = 0;
+    for (let q = 0; q < ks.length && n < 3; q += 3) {
+      const k = ks[q];
+      if (this.cache.has(k)) continue;
+      if (now() + this._gEst[this.jobs.get(k)?.stage ?? 0] * 0.7 >= until) break;
+      n++;
+      if (!this._advance(tier, k, ks[q + 1], ks[q + 2], until)) break;
     }
-    do {
-      if (this._stepJob(job)) {
-        this.jobs.delete(best);
-        if (!job.failed) this.cache.set(best, { canvas: job.canvas, tier: tier.id, ci: job.ci, cj: job.cj });
-        break;
-      }
-    } while (now() + this._gEst[job.stage] * 0.7 < until);
   }
 
   /** 아직 없는 청크: 전체 지도 확대 위에, 다른 단계 청크가 있으면 그 조각을 */
@@ -1900,7 +2009,7 @@ export class WorldRenderer {
     ctx.lineJoin = 'round';
     const t0 = now();
     try {
-      drawCanopy(ctx, st, ti, tj, x0, y0, x0 + cs, y0 + cs, job.stage);
+      drawCanopy(ctx, st, ti, tj, x0, y0, x0 + cs, y0 + cs, job.stage, res >= 16 ? 1 : 0.45);
     } catch (err) {
       console.error('[world canopy]', err);
       job.stage = CANOPY_STAGES;
@@ -1923,7 +2032,8 @@ export class WorldRenderer {
 
   /** 이번 프레임에 만들기 작업을 더 해도 되나 (땅·수관·지붕이 한 예산을 나눠 쓴다) */
   workLeft() {
-    return this.workBudget - (now() - (this._frameT0 || 0));
+    const t = now();
+    return Math.max(this.workBudget - (t - (this._frameT0 || 0)), (this._syncUntil || 0) - t);
   }
 
   drawCanopyLayer(ctx, game, view) {
@@ -1935,54 +2045,72 @@ export class WorldRenderer {
     const cj0 = Math.max(0, Math.floor((view.y0 - 4) / cs)), cj1 = Math.min(Math.ceil(H / cs) - 1, Math.floor((view.y1 + 4) / cs));
     const cam = game.camera;
     const eps = 0.8 / ((cam.zoom || 14) * (cam.dpr || 1));
-    const items = [];
     const cx = cam.x, cy = cam.y;
     const key = (ci, cj) => (ct.id * 4096 + cj) * 4096 + ci;
-    let pending = null, pd = Infinity, pci = 0, pcj = 0;
-    for (let cj = cj0; cj <= cj1; cj++)
-      for (let ci = ci0; ci <= ci1; ci++) {
-        const k = key(ci, cj);
-        const e = this.canopy.get(k);
+    // 착지할 화면(순간이동·시작): 같은 프레임에 끝까지
+    let nLand = 0;
+    if (this.landing && now() < this._syncUntil) {
+      const L = this.landing;
+      const lk = this._keysIn(cs, L.x0 - 4, L.y0 - 4, L.x1 + 4, L.y1 + 4, (L.x0 + L.x1) / 2, (L.y0 + L.y1) / 2, key, this._clr('_clk'));
+      nLand = lk.length / 3;
+      for (let q = 0; q < lk.length; q += 3) {
+        const k = lk[q], e = this.canopy.get(k);
         if (e) {
           this.canopy.delete(k);
           this.canopy.set(k, e);
-        } else {
-          const d = Math.hypot((ci + 0.5) * cs - cx, (cj + 0.5) * cs - cy);
-          if (d < pd) {
-            pd = d;
-            pending = k;
-            pci = ci;
-            pcj = cj;
-          }
-        }
-        items.push([ci, cj, k]);
-      }
-    // 가장 가까운 빈 청크부터 단계 진행 (예산 안에서, 적어도 몇 프레임에 한 번은)
-    if (pending !== null) {
-      this._canopyStarve = (this._canopyStarve || 0) + 1;
-      let job = this.canopyJobs.get(pending);
-      if (!job) {
-        job = { ct, ci: pci, cj: pcj, stage: 0, canvas: null, empty: false };
-        this.canopyJobs.set(pending, job);
-      }
-      while (this.workLeft() > this._cEst[job.stage] * 0.7 || (this._canopyStarve > 4 && this.workLeft() > 0)) {
-        this._canopyStarve = 0;
-        if (this._stepCanopy(job)) {
-          this.canopyJobs.delete(pending);
-          this.canopy.set(pending, { canvas: job.empty ? null : job.canvas, ct: ct.id });
-          break;
-        }
+        } else if (now() < this._syncUntil) this._advanceCanopy(ct, k, lk[q + 1], lk[q + 2], this._syncUntil, true);
       }
     }
-    if (this.canopyJobs.size > 6) {
+    // 화면 안: 가까운 빈 청크부터 단계 진행 (예산 안에서, 굶으면 몇 프레임에 한 번은 억지로)
+    const items = this._keysIn(cs, ci0 * cs, cj0 * cs, (ci1 + 1) * cs - 0.01, (cj1 + 1) * cs - 0.01, cx, cy, key, this._clr('_cvk'));
+    let firstPending = -1, progressed = false;
+    for (let q = 0; q < items.length; q += 3) {
+      const k = items[q], e = this.canopy.get(k);
+      if (e) {
+        this.canopy.delete(k);
+        this.canopy.set(k, e);
+        continue;
+      }
+      if (this.flying) continue; // 스쳐 가는 화면
+      if (firstPending < 0) firstPending = q;
+      const job = this.canopyJobs.get(k);
+      const est = this._cEst[job?.stage ?? 0] * 0.7;
+      if (this.workLeft() > est) {
+        const st0 = job?.stage ?? 0;
+        this._advanceCanopy(ct, k, items[q + 1], items[q + 2], now() + this.workLeft());
+        if ((this.canopyJobs.get(k)?.stage ?? 99) !== st0) progressed = true;
+      }
+    }
+    // 예산이 늘 모자라 한 단계도 못 나갔으면 몇 프레임에 한 번은 가장 가까운 것을 억지로 한 단계
+    if (firstPending >= 0 && !progressed) {
+      this._canopyStarve = (this._canopyStarve || 0) + 1;
+      if (this._canopyStarve > 3) {
+        this._canopyStarve = 0;
+        this._advanceCanopy(ct, items[firstPending], items[firstPending + 1], items[firstPending + 2], 0, true);
+      }
+    } else this._canopyStarve = 0;
+    // 앞쪽 미리 (화면 둘레 + 이동 방향)
+    if (!this.flying && this.workLeft() > 1) {
+      const { vx, vy } = this._vel(game);
+      const m = cs * 0.5, lead = 2.5;
+      const pk = this._keysIn(cs, view.x0 - m + Math.min(0, vx * lead), view.y0 - m + Math.min(0, vy * lead), view.x1 + m + Math.max(0, vx * lead), view.y1 + m + Math.max(0, vy * lead), cx + vx * lead * 0.6, cy + vy * lead * 0.6, key, this._clr('_cpk'));
+      for (let q = 0; q < pk.length; q += 3) {
+        if (this.canopy.has(pk[q])) continue;
+        const left = this.workLeft();
+        if (left <= this._cEst[this.canopyJobs.get(pk[q])?.stage ?? 0] * 0.7) break;
+        if (!this._advanceCanopy(ct, pk[q], pk[q + 1], pk[q + 2], now() + left)) break;
+      }
+    }
+    if (this.canopyJobs.size > 8) {
       for (const [k, j] of this.canopyJobs) {
-        if (this.canopyJobs.size <= 3) break;
-        if (j.canvas) this.canopyPool[j.ct.id].push(j.canvas);
+        if (this.canopyJobs.size <= 4) break;
+        if (j.canvas && this.canopyPool[j.ct.id].length < 4) this.canopyPool[j.ct.id].push(j.canvas);
         this.canopyJobs.delete(k);
       }
     }
     const drawAll = (filter) => {
-      for (const [ci, cj, k] of items) {
+      for (let q = 0; q < items.length; q += 3) {
+        const k = items[q], ci = items[q + 1], cj = items[q + 2];
         if (filter && !filter(ci, cj)) continue;
         const e = this.canopy.get(k);
         if (e) {
@@ -2028,8 +2156,9 @@ export class WorldRenderer {
       drawAll(near);
       ctx.restore();
     }
-    // 정리
-    while (this.canopy.size > ct.max) {
+    // 정리 (보이는 청크 수만큼은 남긴다)
+    const maxC = Math.max(ct.max, Math.ceil((items.length / 3) * 2.2) + nLand + 6);
+    while (this.canopy.size > maxC) {
       const k = this.canopy.keys().next().value;
       const e = this.canopy.get(k);
       this.canopy.delete(k);
@@ -2038,8 +2167,41 @@ export class WorldRenderer {
     }
   }
 
+  /** 수관 청크 작업을 until 까지 (force 면 적어도 한 단계). 끝나면 true */
+  _advanceCanopy(ct, k, ci, cj, until, force = false) {
+    let job = this.canopyJobs.get(k);
+    if (!job) {
+      job = { ct, ci, cj, stage: 0, canvas: null, empty: false };
+      this.canopyJobs.set(k, job);
+    }
+    let first = force;
+    while (first || now() + this._cEst[job.stage] * 0.7 < until) {
+      first = false;
+      if (this._stepCanopy(job)) {
+        this.canopyJobs.delete(k);
+        this.canopy.set(k, { canvas: job.empty ? null : job.canvas, ct: ct.id });
+        return true;
+      }
+    }
+    return false;
+  }
+
   drawRoofs(ctx, game, view) {
-    this.roofs.draw(ctx, game, view, () => this.workLeft());
+    const R = this.roofs, left = () => this.workLeft();
+    // 착지할 화면의 지붕도 미리 (도약 프레임)
+    if (this.landing && now() < this._syncUntil) R.prebuild(game, this.landing, left, 400);
+    R.draw(ctx, game, view, left);
+    // 여유가 있으면 화면 둘레·앞쪽 지붕을 미리
+    if (!this.flying && this.workLeft() > 1) {
+      const { vx, vy } = this._vel(game);
+      const m = 12, lead = 2.5;
+      const r = this._roofAhead || (this._roofAhead = { x0: 0, y0: 0, x1: 0, y1: 0 });
+      r.x0 = view.x0 - m + Math.min(0, vx * lead);
+      r.y0 = view.y0 - m + Math.min(0, vy * lead);
+      r.x1 = view.x1 + m + Math.max(0, vx * lead);
+      r.y1 = view.y1 + m + Math.max(0, vy * lead);
+      R.prebuild(game, r, left, 3);
+    }
   }
 
   // ---------------------------------------------------------------- 전체 지도

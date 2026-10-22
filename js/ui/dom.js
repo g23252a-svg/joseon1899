@@ -229,6 +229,34 @@ export function safe(fn, fallback) {
   }
 }
 
+/**
+ * 화면을 통째로 다시 그려도 자판 포커스를 잃지 않게: 그리기 전 포커스가 container 안의 [data-fk] 요소에 있었으면
+ * 다시 그린 뒤 같은 data-fk 요소로 돌려준다. 없거나 눌 수 없게 되었으면 fallback 선택자 → 첫 [data-fk] 순으로.
+ */
+export function keepFocus(container, render, fallback = null) {
+  let key = null, ae = null;
+  try {
+    ae = document.activeElement;
+    if (ae && ae !== document.body && container.contains(ae)) key = ae.getAttribute?.('data-fk') ?? '';
+  } catch (err) {
+    key = null;
+  }
+  render();
+  if (key == null) return;
+  try {
+    if (ae.isConnected === true && container.contains(ae)) return; // 다시 그리지 않은 요소(수량 단추 등)는 그대로
+
+    const esc = (s) => (typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
+    const ok = (el) => el && !el.disabled && el.offsetParent !== null;
+    let el = key ? container.querySelector(`[data-fk="${esc(key)}"]`) : null;
+    if (!ok(el) && fallback) el = container.querySelector(fallback);
+    if (!ok(el)) el = [...container.querySelectorAll('[data-fk]')].find(ok) || null;
+    el?.focus?.({ preventScroll: false });
+  } catch (err) {
+    /* 무시 */
+  }
+}
+
 /** 작은 캔버스 만들기 (CSS 크기 w×h, dpr 반영) */
 export function makeCanvas(w, h, cls) {
   const c = document.createElement('canvas');
