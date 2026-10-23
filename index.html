@@ -1,4 +1,6 @@
 <title>조선 1899</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Song+Myung&family=Nanum+Brush+Script&display=swap" rel="stylesheet">
@@ -16,6 +18,8 @@
     --font-brush: "Nanum Brush Script", "Song Myung", cursive;
     color-scheme: light;
   }
+  /* 아티팩트 뼈대가 없는 곳(GitHub 등)에서도 hidden 속성이 CSS display 를 이기게 */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0;

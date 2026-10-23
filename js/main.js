@@ -58,7 +58,10 @@ async function boot() {
   progress(0.95, '먹을 가는 중');
   await game.start();
   progress(1, '');
-  if (loadingEl) loadingEl.hidden = true;
+  if (loadingEl) {
+    loadingEl.hidden = true;
+    loadingEl.style.display = 'none'; // CSS 규칙이 없어도 확실히 숨긴다
+  }
 
   // UI 모듈이 타이틀 화면을 띄운다. 없으면 바로 시작.
   if (game.sys.ui?.showTitle) game.sys.ui.showTitle();
