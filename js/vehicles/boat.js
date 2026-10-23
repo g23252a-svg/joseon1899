@@ -300,7 +300,9 @@ export class FerryService {
     if (this.state === 'wait') {
       const home = this.dock(this.side);
       if (Math.hypot(home.x - b.x, home.y - b.y) > 1) (b.x += (home.x - b.x) * dt * 0.5), (b.y += (home.y - b.y) * dt * 0.5); // 매어 둔 자리로
-      const go = this.go || (pl && !night && this.t > (this.boardT ?? 0) + 6) || (!pl && !night && this.t > this.period + 8);
+      // 플레이어가 나루 가까이 있으면 빈 배로 떠나지 않는다 (첫 미션에서 사공이 먼저 떠나 버리던 문제)
+      const pp = game.player, waiting = !pl && pp && !pp.vehicle && Math.hypot(pp.x - b.x, pp.y - b.y) < 70;
+      const go = this.go || (pl && !night && this.t > (this.boardT ?? 0) + 6) || (!pl && !night && !waiting && this.t > this.period + 8);
       if (!go) return;
       this.go = false;
       this.state = 'cross';

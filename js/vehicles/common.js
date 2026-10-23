@@ -88,7 +88,9 @@ export function seatInteractions(v, actor, game) {
   // (빈 거룻배 옆에서 F 를 눌렀는데 승객석에 앉으면 노를 저을 수 없어 조작이 멈춘 것처럼 보인다)
   const di = v.playerCanDrive ? v.seats.findIndex((q) => q.role === 'driver' && !q.occupant) : -1;
   if (di >= 0) return [{ key: 'enter', label: `${v.displayName} 타기`, priority: 5, run: (a) => takeDriver(v, a, game, di) }];
-  const i = nearestSeat(v, actor, (s) => s.role !== 'crew' && (s.role !== 'driver' || v.playerCanDrive) && (!s.occupant || (s.role === 'driver' && v.stealable && !s.occupant.isPlayer)));
+  // 사공이 젓는 나룻배(운행 배)는 F 로 빼앗지 않고 승객석에 오른다
+  const steal = v.stealable && !v.ferry;
+  const i = nearestSeat(v, actor, (s) => s.role !== 'crew' && (s.role !== 'driver' || (v.playerCanDrive && !(v.ferry && s.occupant))) && (!s.occupant || (s.role === 'driver' && steal && !s.occupant.isPlayer)));
   if (i < 0) return [];
   const s = v.seats[i];
   if (s.occupant) return [{ key: 'enter', label: `${v.displayName} 빼앗기`, priority: 4, run: (a) => v.steal(a, game) }];

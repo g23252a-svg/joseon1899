@@ -43,16 +43,15 @@ export const MISSIONS = [
     sum: '노량진나루에서 관선을 타고 한강을 건너, 덕구에게서 조랑말 먹구름을 받았다.',
     spawn: [
       { npc: 'sagong_noryang', x: 2730, y: 1574 },
-      ROW('rowboat', 2730, 1554, -1.6, { tag: 'm01_ferry', owner: 'public', name: '관선', driverNpc: 'sagong_noryang' }),
       { npc: 'deokgu', x: 2770, y: 1440 },
       { vehicle: 'pony', x: 2774, y: 1444, angle: 0, tag: 'meokgureum', name: '먹구름', owner: 'player', keep: true, once: true },
     ],
     steps: [
       { type: 'reach', text: '노량진나루로 가라', x: 2730, y: 1572, r: 20, hint: '방향키(WASD)로 걷고 Shift 로 달린다.' },
-      { type: 'talk', text: '사공에게 말을 걸어라', npcId: 'sagong_noryang', say: L('사공: 관선이라 삯은 없소. 그래도 막걸리 한 사발 값은 인정이지.'),
+      // 배는 나루 운행 배(사공 = sagong_noryang)를 쓴다. 말을 안 걸고 바로 타도 넘어간다(alt)
+      { type: 'talk', text: '사공에게 말을 걸어라 (바로 배에 올라도 된다)', npcId: 'sagong_noryang', alt: { type: 'mount', vtype: 'rowboat' }, say: L('사공: 관선이라 삯은 없소. 그래도 막걸리 한 사발 값은 인정이지.'),
         choice: { q: '막걸리 값을 줄까?', opts: [{ t: '막걸리 값 1전을 준다', fx: { money: -1, honor: 1 } }, { t: '그냥 탄다' }] } },
-      { type: 'mount', text: '나룻배에 올라라', vtype: 'rowboat', role: 'passenger', hint: 'F 로 배에 오른다. 사공이 노를 젓는다.', skipTp: [2760, 1450],
-        done: (g, M) => M.goto(M.vehicle('m01_ferry'), 2760, 1474) },
+      { type: 'mount', text: '나룻배에 올라라', vtype: 'rowboat', role: 'passenger', hint: 'F 로 배에 오른다. 사공이 노를 젓는다 (E 로 "출발하세").', skipTp: [2760, 1450] },
       { type: 'reach', text: '용산나루에 내려라', x: 2760, y: 1452, r: 25,
         chat: L('한길: …한성에 무슨 구경거리라도 났소?', '사공: 전기거라나. 소도 말도 없이 쇠수레가 저 혼자 간다오.', '사공: 비가 안 오는 것도 그 탓이라던데.'),
         done: (g, M) => M.dismount(g.player) },

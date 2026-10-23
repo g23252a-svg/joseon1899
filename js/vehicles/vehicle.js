@@ -196,10 +196,12 @@ export class Vehicle extends Entity {
     const c = this.ctl;
     if (d && d.isPlayer && d.state === 'normal') {
       this.playerControls(game.input, dt, game);
+    } else if (this.autopilot && (!d || !d.isPlayer)) {
+      // 나루·노선처럼 운행 자동조종이 있는 탈것은 운전하는 NPC 의 두뇌보다 자동조종이 먼저다
+      // (이름 있는 사공의 두뇌가 나룻배를 엉뚱한 곳으로 몰던 문제)
+      this.autopilot(dt, game);
     } else if (d && d.brain?.drive) {
       d.brain.drive(this, d, dt, game);
-    } else if (this.autopilot) {
-      this.autopilot(dt, game);
     } else {
       c.throttle = 0;
       c.steer = 0;
