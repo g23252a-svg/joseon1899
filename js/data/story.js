@@ -138,8 +138,9 @@ export const MISSIONS = [
     steps: [
       { type: 'reach', text: '남대문로를 달려 숭례문을 빠져나가라', x: 2575, y: 1068, r: 15, say: L('이시중: 멈추시오! 경무청 총순 이시중이오!') },
       { type: 'reach', text: '용산나루까지 달려라', x: 2760, y: 1452, r: 20 },
+      // 거룻배는 용산나루에 정박한 증기선(2750~2770, 1480)과 겹치지 않는 동쪽 물가에 둔다
       { type: 'mount', text: '말에서 내려 거룻배에 올라 노를 잡아라', vtype: 'rowboat', role: 'driver', skipTp: [2730, 1572],
-        onStart: { spawn: [ROW('rowboat', 2760, 1474, 1.6, { tag: 'm04_boat', passengers: ['oh_janghun', 'ma_cheonbok'], once: true }), { npc: 'deokgu', x: 2765, y: 1452 }] },
+        onStart: { spawn: [ROW('rowboat', 2782, 1467, 1.6, { tag: 'm04_boat', passengers: ['oh_janghun', 'ma_cheonbok'], once: true }), { npc: 'deokgu', x: 2765, y: 1452 }] },
         start: (g, M) => { M.hide('bau'); M.stableHorse(1522, 2142); }, say: L('덕구: 먹구름은 제가 아침 배로 건네 갈게요! 어서 가요!') },
       { type: 'reach', text: '노를 저어 노량진나루에 닿아라', x: 2730, y: 1572, r: 20, say: L('오장헌: 저어라, 길아. 물살 거슬러 비스듬히!'),
         hint: '방향키로 뱃머리를 돌리고 Shift 로 힘껏 젓는다.', onStart: { spawn: [{ npc: 'lee_sijung', x: 2760, y: 1446, brain: 'police', hostile: true, weapon: 'w_revolver' }] },

@@ -133,6 +133,15 @@ export class Boat extends Vehicle {
     clearSpread(h);
     h.mountedOnly = null;
   }
+  /** 타는 거리: 증기선은 가운데 현문 근처에서만(20 m 선체 어디서나 잡히면 옆의 작은 배를 가린다),
+   *  나룻배·돛배는 물가에서 한 걸음 건너 탈 수 있게 몸통 테두리 기준 */
+  interactDistance(actor) {
+    if (this.vtype === 'steamer') return Math.hypot(actor.x - this.x, actor.y - this.y) - 3;
+    return super.interactDistance(actor);
+  }
+  get interactRange() {
+    return this.vtype === 'steamer' ? 1.7 : 2.8;
+  }
   getInteractions(actor, game) {
     return this.follow ? [] : seatInteractions(this, actor, game);
   }
@@ -507,6 +516,9 @@ export class SteamerService {
   /** 정박한 증기선 25 m 안에서 F */
   offer(actor, game) {
     if (actor.vehicle) return null;
+    // 미션 단계가 다른 탈것(예: 거룻배)을 요구하면 증기선 안내로 F 를 가로채지 않는다
+    const ms = game.sys.missions?.active, step = ms?.def?.steps?.[ms.step];
+    if (step?.type === 'mount' && step.vtype && step.vtype !== 'steamer') return null;
     for (const v of this.boats) {
       if (!v.alive || v.sv.state === 'run' || Math.hypot(v.x - actor.x, v.y - actor.y) > 25) continue;
       const i = v.seats.findIndex((s) => s.role === 'passenger' && !s.occupant);

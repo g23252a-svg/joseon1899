@@ -84,6 +84,10 @@ export function nearestSeat(v, actor, ok) {
 /** 플레이어 F 상호작용: 타기·빼앗기·승객. v.board(actor, i, game) 가 있으면 승객 탑승은 그쪽으로 */
 export function seatInteractions(v, actor, game) {
   if (!actor.isPlayer || actor.vehicle === v || v.wrecked || v.down || v.stabled || v.noBoard) return [];
+  // 운전석(노·고삐)이 비어 있으면 가까운 승객석보다 먼저 그 자리를 잡는다.
+  // (빈 거룻배 옆에서 F 를 눌렀는데 승객석에 앉으면 노를 저을 수 없어 조작이 멈춘 것처럼 보인다)
+  const di = v.playerCanDrive ? v.seats.findIndex((q) => q.role === 'driver' && !q.occupant) : -1;
+  if (di >= 0) return [{ key: 'enter', label: `${v.displayName} 타기`, priority: 5, run: (a) => takeDriver(v, a, game, di) }];
   const i = nearestSeat(v, actor, (s) => s.role !== 'crew' && (s.role !== 'driver' || v.playerCanDrive) && (!s.occupant || (s.role === 'driver' && v.stealable && !s.occupant.isPlayer)));
   if (i < 0) return [];
   const s = v.seats[i];

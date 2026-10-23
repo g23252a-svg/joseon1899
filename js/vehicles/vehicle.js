@@ -275,7 +275,14 @@ export class Vehicle extends Entity {
 
   /** 플레이어가 타고 내릴 수 있는 거리 판정 (긴 탈것은 덮어쓴다) */
   interactDistance(actor) {
-    return Math.hypot(actor.x - this.x, actor.y - this.y) - this.radius;
+    // 탈것의 실제 몸통(길이 × 폭 회전 사각형) 바깥 테두리까지의 거리.
+    // 중심 원으로 재면 8 m 나룻배·전차·기차는 가운데까지 다가가야 탈 수 있었다.
+    const c = Math.cos(-this.angle), n = Math.sin(-this.angle);
+    const dx = actor.x - this.x, dy = actor.y - this.y;
+    const lx = dx * c - dy * n, ly = dx * n + dy * c;
+    const qx = Math.max(Math.abs(lx) - (this.length || 0) / 2, 0);
+    const qy = Math.max(Math.abs(ly) - (this.width || 0) / 2, 0);
+    return Math.min(Math.hypot(qx, qy), Math.hypot(dx, dy) - this.radius);
   }
 
   getInteractions(actor, game) {

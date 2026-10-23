@@ -971,6 +971,14 @@ export function install(game) {
   g.on('player:dead', () => { if (st && !st.ending) { st.dead = clock || 1e-6; st.tok++; st.busy = true; } });
   g.on('player:respawn', () => { if (st?.dead) { st.dead = 0; fail('쓰러졌다'); } });
   g.on('game:start', () => { newGame = !S.save?.loaded; });
+  // 엉뚱한 탈것에 탔을 때 길잡이 (예: 거룻배 대신 증기선 승객이 되면 조종할 수 없어 멈춘 것처럼 보인다)
+  g.on('vehicle:enter', (e) => {
+    const s = curIs('mount');
+    if (!s || e?.human !== P() || !e.vehicle) return;
+    const v = e.vehicle, role = v.seats?.[e.seat]?.role;
+    const wrong = (s.vtype && v.vtype !== s.vtype) || (s.moveMode && v.moveMode !== s.moveMode) || (s.role && role !== s.role);
+    if (wrong) g.notify(`지금 목표와 다른 탈것입니다. F 로 내려서 '${s.text}'`, 'warn');
+  });
   g.on('save:beforeLoad', () => { newGame = false; });
   g.on('save:load', () => {
     applyDate(true);
