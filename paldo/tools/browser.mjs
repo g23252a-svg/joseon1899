@@ -114,7 +114,8 @@ async function settle(maxMs = 60000) {
     await page.waitForTimeout(150);
     const scrims = await page.locator('.scrim').count();
     const busy = await page.locator('.busy').count();
-    if (!scrims && !busy) { if (++idle > 4) return; continue; }
+    const turning = await page.locator('.endturn:disabled').count();
+    if (!scrims && !busy && !turning) { if (++idle > 4) return; continue; }
     idle = 0;
     for (const [sel, name] of [['.evt', 'event'], ['.duel', 'duel'], ['.scrim h2:text-is("포로")', 'captive'], ['.scrim h2:text-is("적의 침공!")', 'invasion'], ['.bres', 'battle-result']]) {
       if (!seen.has(name) && await page.locator(sel).count()) { seen.add(name); await page.waitForTimeout(250); await shot('seen-' + name); }
@@ -125,14 +126,14 @@ async function settle(maxMs = 60000) {
     if (await tryBtn(page.getByRole('button', { name: '끝까지 맡기기' }))) continue;
     if (await tryBtn(page.getByRole('button', { name: '수비대장에게 맡긴다' }))) continue;
     if (await tryBtn(page.getByRole('button', { name: '맡기기', exact: true }))) continue;
-    if (await tryBtn(page.getByRole('button', { name: '석방' }))) continue;
-    if (await tryBtn(page.getByRole('button', { name: '물리친다' }))) continue;
-    if (await tryBtn(page.getByRole('button', { name: '피한다' }))) continue;
-    if (await tryBtn(page.getByRole('button', { name: '넘긴다' }))) continue;
+    if (await tryBtn(page.getByRole('button', { name: '석방', exact: true }))) continue;
+    if (await tryBtn(page.getByRole('button', { name: '물리친다', exact: true }))) continue;
+    if (await tryBtn(page.getByRole('button', { name: '피한다', exact: true }))) continue;
+    if (await tryBtn(page.getByRole('button', { name: '넘긴다', exact: true }))) continue;
     if (await tryBtn(page.locator('.scrim .df button.btn.primary'))) continue;
     if (await tryBtn(page.locator('.scrim .dh .x'))) continue;
   }
-  errors.push('settle timeout');
+  errors.push('settle timeout'); await shot('settle-timeout');
 }
 const turns = Number(args.turns || 6);
 for (let t = 0; t < turns; t++) {

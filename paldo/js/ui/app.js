@@ -580,12 +580,14 @@ export function createApp({ onTitle }) {
     app.busy = true; renderTop();
     const before = { gold: S.factions[P].gold, rice: S.factions[P].rice, regs: regionsOf(S, P).length, log: S.log.length };
     busy('다른 세력이 움직인다…');
+    turning = true;
     try {
       await endTurn(S, hooks);
     } catch (e) {
       console.error(e);
       toast('턴 처리 중 문제가 생겼다: ' + e.message, 'bad', 8000);
     }
+    turning = false;
     busy(null);
     app.busy = false;
     if (S.season === 0) { app.save('auto'); }
@@ -617,6 +619,9 @@ export function createApp({ onTitle }) {
 
   // ── 핵심 규칙이 부르는 UI 연결 ──
   const notified = new Set();
+  let turning = false;
+  // 대화 상자가 닫힌 뒤에도 철 처리가 이어지면 '진행 중' 표시를 되살린다
+  const resume = (p) => Promise.resolve(p).then((v) => { if (turning) busy('철을 정리하는 중…'); return v; });
   const hooks = {
     progress: (text) => busy(text),
     notify: (text, kind) => { notified.add(text); toast(text, kind || 'info', 5000); },
@@ -635,12 +640,13 @@ export function createApp({ onTitle }) {
     battleResult: async (B, res) => {
       if (res.text) toast(res.text, (B.winner === 'atk') === (B.atk.fid === app.S.player) ? 'good' : 'bad', 4500);
       app.refresh(true);
+      if (turning) busy('철을 정리하는 중…');
     },
-    captive: (o) => captiveDialog(o),
+    captive: (o) => resume(captiveDialog(o)),
     event: (inst) => eventDialog(inst),
-    eventResult: (inst, text) => eventResultP(text),
+    eventResult: (inst, text) => resume(eventResultP(text)),
     duel: async (D, opts) => { busy(null); await runDuel(app.S, D, 'a', opts?.title || '일기토'); },
-    proposal: (p) => proposalDialog(p),
+    proposal: (p) => resume(proposalDialog(p)),
   };
   app.hooks = hooks;
 
