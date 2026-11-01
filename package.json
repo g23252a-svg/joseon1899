@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "smoke": "node tools/smoke.mjs"
+    "smoke": "node tools/smoke.mjs",
+    "paldo:sim": "node paldo/tools/sim.mjs",
+    "paldo:browser": "node paldo/tools/browser.mjs"
   }
 }

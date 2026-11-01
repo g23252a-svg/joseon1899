@@ -23,3 +23,17 @@ node tools/smoke.mjs --ticks=3000
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 모듈 구조와 API 계약
 - docs/GDD.md, docs/prototype_spec.md — 기획서와 구현 명세(작성 중)
+
+---
+
+## 팔도천하 — 조선 군웅 전략 (`paldo/`)
+
+같은 저장소에 들어 있는 두 번째 게임. 삼국지식 장수 경영 + 문명식 문물 나무·위업 + 빅토리아식 세력 집단·법령을 엮은 턴제 전략 게임이다.
+가상 시나리오 「팔도군웅전」(세종·이성계·이순신·정조·홍경래…)과 역사 시나리오 「임진년」(1592~1598)이 있다.
+
+```bash
+node tools/devserver.cjs . 5173
+# → http://localhost:5173/paldo/index.html
+```
+
+자세한 내용은 [paldo/README.md](paldo/README.md), 기획은 [paldo/docs/GDD.md](paldo/docs/GDD.md).
